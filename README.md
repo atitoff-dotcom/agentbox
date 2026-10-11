@@ -210,6 +210,31 @@ agentbox grep "handle_packet" src/ --max 10
 
 ---
 
+### 5. Knowledge Graph & Architecture (`graphify`)
+
+AgentBox integrates with `graphifyy` to build and navigate deep code knowledge graphs without blowing LLM context budgets:
+
+#### `agentbox graphify-install [--upgrade]`
+Silently ensures `graphifyy` is installed on the local machine or remote SSH server:
+```bash
+agentbox graphify-install
+```
+
+#### `agentbox graphify-build [path] [--deep]`
+Silently builds a navigable knowledge graph on the target host:
+```bash
+agentbox graphify-build
+# Output: OK: Knowledge graph built in 4.2s (180 nodes, 420 edges). Location: graphify-out
+```
+
+#### `agentbox graphify-query "<question>"`
+Queries graph structure, relationships, and God nodes directly on the host, returning token-capped answers (~150 tokens instead of dumping megabytes of JSON):
+```bash
+agentbox graphify-query "Authentication and Token flow"
+```
+
+---
+
 ## 🤖 System Prompt for AI Agents
 
 Add this rule to your project's `AGENTS.md` or `.cursorrules` to instruct your AI agent to use `agentbox`:

@@ -609,6 +609,172 @@ def cmd_logs(task_id: str, lines: int = 50, follow: bool = False) -> None:
         sys.exit(1)
 
 
+def _find_graphify_python() -> str:
+    """Finds python executable that has graphify installed or in graphify-out/.graphify_python."""
+    pointer = Path("graphify-out/.graphify_python")
+    if pointer.is_file():
+        try:
+            py = pointer.read_text(encoding="utf-8").strip()
+            if py and Path(py).exists():
+                return py
+        except Exception:
+            pass
+
+    # Check current python
+    try:
+        proc = subprocess.run([sys.executable, "-c", "import graphify; print(sys.executable)"], capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+
+    # Check uv / pipx
+    for cmd in ["uv", "pipx", "python3", "python"]:
+        path = shutil.which(cmd)
+        if path:
+            try:
+                chk = subprocess.run([path, "-c", "import graphify; print('OK')"] if "python" in cmd else [path, "run", "python", "-c", "import graphify; print('OK')"], capture_output=True, text=True)
+                if chk.returncode == 0:
+                    return path
+            except Exception:
+                pass
+
+    return ""
+
+
+def cmd_graphify_install(upgrade: bool = False) -> None:
+    """Silently installs or updates graphifyy on the target machine."""
+    existing_py = _find_graphify_python()
+    if existing_py and not upgrade:
+        print(f"OK: graphify already installed at {existing_py}")
+        return
+
+    print("Installing graphifyy (silent mode)...")
+    cmd = []
+    if shutil.which("uv"):
+        cmd = ["uv", "tool", "install", "--upgrade", "graphifyy"] if upgrade else ["uv", "tool", "install", "graphifyy"]
+    elif shutil.which("pipx"):
+        cmd = ["pipx", "upgrade", "graphifyy"] if upgrade else ["pipx", "install", "graphifyy"]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade" if upgrade else "--quiet", "graphifyy"]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"FAILED: Failed to install graphifyy (exit {proc.returncode})\n{proc.stderr.strip()[:400]}", file=sys.stderr)
+        sys.exit(proc.returncode)
+
+    py = _find_graphify_python()
+    print(f"OK: graphifyy installed successfully. Interpreter: {py or sys.executable}")
+
+
+def cmd_graphify_build(path: str = ".", deep: bool = False) -> None:
+    """Builds a knowledge graph with graphifyy silently, reporting summary."""
+    p = to_path(path)
+    py = _find_graphify_python() or sys.executable
+
+    log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "graphify_build.log"
+
+    build_cmd = [py, "-m", "graphify", str(p)]
+    if deep:
+        build_cmd.append("--mode=deep")
+
+    start_time = time.time()
+    with open(log_file, "w", encoding="utf-8") as out:
+        out.write(f"=== Graphify Build: {' '.join(build_cmd)}\n=== Started: {time.ctime(start_time)}\n\n")
+        out.flush()
+        proc = subprocess.run(build_cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(p))
+
+    dur = time.time() - start_time
+    if proc.returncode != 0:
+        print(f"FAILED: Graphify build failed [exit {proc.returncode}, {dur:.1f}s]. Log: {log_file}", file=sys.stderr)
+        sys.exit(proc.returncode)
+
+    # Check graph.json / GRAPH_REPORT.md
+    out_dir = p / "graphify-out"
+    graph_file = out_dir / "graph.json"
+    if graph_file.is_file():
+        try:
+            data = json.loads(graph_file.read_text(encoding="utf-8"))
+            nodes_cnt = len(data.get("nodes", []))
+            edges_cnt = len(data.get("edges", []))
+            print(f"OK: Knowledge graph built in {dur:.1f}s ({nodes_cnt} nodes, {edges_cnt} edges). Location: {out_dir}")
+            return
+        except Exception:
+            pass
+
+    print(f"OK: Graphify completed in {dur:.1f}s. Outputs in {out_dir}")
+
+
+def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500) -> None:
+    """Queries an existing graphify knowledge graph without blowing LLM context."""
+    p = to_path(path)
+    out_dir = p / "graphify-out"
+    graph_file = out_dir / "graph.json"
+    report_file = out_dir / "GRAPH_REPORT.md"
+
+    if not graph_file.is_file() and not report_file.is_file():
+        print(f"ERROR: No knowledge graph found in {p}. Run 'agentbox graphify build' first.", file=sys.stderr)
+        sys.exit(1)
+
+    py = _find_graphify_python() or sys.executable
+    # Try native graphify query CLI
+    proc = subprocess.run([py, "-m", "graphify", "query", question], capture_output=True, text=True, cwd=str(p))
+    if proc.returncode == 0 and proc.stdout.strip():
+        # Trim output to token budget
+        output_lines = proc.stdout.strip().splitlines()[:50]
+        print(f"=== GRAPH QUERY: {question} ===")
+        print("\n".join(output_lines))
+        return
+
+    # Lightweight in-worker fallback on graph.json
+    if graph_file.is_file():
+        try:
+            data = json.loads(graph_file.read_text(encoding="utf-8"))
+            tokens = set(re.findall(r"[a-zA-Z0-9_]+", question.lower()))
+            matched_nodes = []
+            for node in data.get("nodes", []):
+                label = str(node.get("label", ""))
+                node_id = str(node.get("id", ""))
+                score = sum(1 for t in tokens if t in label.lower() or t in node_id.lower())
+                if score > 0:
+                    matched_nodes.append((score, node))
+
+            matched_nodes.sort(key=lambda x: x[0], reverse=True)
+            top_nodes = matched_nodes[:10]
+
+            print(f"=== GRAPH QUERY: {question} ({len(top_nodes)} relevant nodes found) ===")
+            for score, n in top_nodes:
+                nid = n.get("id")
+                lbl = n.get("label", nid)
+                ntype = n.get("node_type", n.get("type", "entity"))
+                loc = n.get("source_location", n.get("file", ""))
+                print(f"• [{ntype}] {lbl} ({loc})")
+
+            # Match connected edges
+            matched_ids = {n.get("id") for _, n in top_nodes}
+            relevant_edges = []
+            for e in data.get("edges", []):
+                src = e.get("source")
+                tgt = e.get("target")
+                rel = e.get("relation", e.get("rel", "->"))
+                if src in matched_ids and tgt in matched_ids:
+                    relevant_edges.append(f"  {src} --[{rel}]--> {tgt}")
+
+            if relevant_edges:
+                print("\nConnections:")
+                for edge in relevant_edges[:10]:
+                    print(edge)
+            return
+        except Exception as e:
+            print(f"ERROR: Failed parsing graph.json: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    print(f"ERROR: Query could not be processed for: {question}", file=sys.stderr)
+    sys.exit(1)
+
+
 def handle_ipc_mode() -> None:
     """Reads a JSON request from stdin and executes it without bash shell escaping."""
     try:
@@ -648,6 +814,12 @@ def handle_ipc_mode() -> None:
         cmd_logs(args.get("task_id"), args.get("lines", 50), args.get("follow", False))
     elif action == "kill":
         cmd_kill(args.get("task_id"))
+    elif action == "graphify_install":
+        cmd_graphify_install(args.get("upgrade", False))
+    elif action == "graphify_build":
+        cmd_graphify_build(args.get("path", "."), args.get("deep", False))
+    elif action == "graphify_query":
+        cmd_graphify_query(args.get("question"), args.get("path", "."), args.get("max_tokens", 1500))
     else:
         print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
         sys.exit(1)
@@ -723,6 +895,18 @@ def main():
     p_kill = sub.add_parser("kill")
     p_kill.add_argument("task_id")
 
+    p_g_inst = sub.add_parser("graphify-install")
+    p_g_inst.add_argument("--upgrade", action="store_true")
+
+    p_g_build = sub.add_parser("graphify-build")
+    p_g_build.add_argument("path", nargs="?", default=".")
+    p_g_build.add_argument("--deep", action="store_true")
+
+    p_g_query = sub.add_parser("graphify-query")
+    p_g_query.add_argument("question")
+    p_g_query.add_argument("path", nargs="?", default=".")
+    p_g_query.add_argument("--max-tokens", type=int, default=1500)
+
     args = parser.parse_args()
 
     if args.cmd == "view":
@@ -753,6 +937,12 @@ def main():
         cmd_logs(args.task_id, args.lines, args.follow)
     elif args.cmd == "kill":
         cmd_kill(args.task_id)
+    elif args.cmd == "graphify-install":
+        cmd_graphify_install(args.upgrade)
+    elif args.cmd == "graphify-build":
+        cmd_graphify_build(args.path, args.deep)
+    elif args.cmd == "graphify-query":
+        cmd_graphify_query(args.question, args.path, args.max_tokens)
 
 
 if __name__ == "__main__":

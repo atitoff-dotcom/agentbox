@@ -105,6 +105,21 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_kill = sub.add_parser("kill", help="Terminate background task")
     p_kill.add_argument("task_id", help="Task ID from spawn command")
 
+    # graphify-install
+    p_gi = sub.add_parser("graphify-install", help="Silently install or update graphifyy on target host")
+    p_gi.add_argument("--upgrade", action="store_true", help="Upgrade graphifyy to latest version")
+
+    # graphify-build
+    p_gb = sub.add_parser("graphify-build", help="Build knowledge graph of target project silently")
+    p_gb.add_argument("path", nargs="?", default="", help="Project path to build graph for")
+    p_gb.add_argument("--deep", action="store_true", help="Run deep extraction mode")
+
+    # graphify-query
+    p_gq = sub.add_parser("graphify-query", help="Query knowledge graph without blowing LLM token budget")
+    p_gq.add_argument("question", help="Natural language query or concept name")
+    p_gq.add_argument("path", nargs="?", default="", help="Project path with graphify-out")
+    p_gq.add_argument("--max-tokens", type=int, default=1500, help="Max token output budget")
+
     return parser
 
 
@@ -167,6 +182,12 @@ def main(argv: Optional[List[str]] = None):
         code = execute_action(host, cwd, "logs", {"task_id": args.task_id, "lines": args.lines, "follow": args.follow})
     elif args.cmd == "kill":
         code = execute_action(host, cwd, "kill", {"task_id": args.task_id})
+    elif args.cmd == "graphify-install":
+        code = execute_action(host, cwd, "graphify_install", {"upgrade": args.upgrade})
+    elif args.cmd == "graphify-build":
+        code = execute_action(host, cwd, "graphify_build", {"path": args.path or cwd, "deep": args.deep})
+    elif args.cmd == "graphify-query":
+        code = execute_action(host, cwd, "graphify_query", {"question": args.question, "path": args.path or cwd, "max_tokens": args.max_tokens})
     else:
         code = 1
 

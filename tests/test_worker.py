@@ -5,6 +5,7 @@ Tests for agentbox worker and client operations.
 
 import os
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,6 +93,24 @@ class TestWorker(unittest.TestCase):
         # A test command that fails
         with self.assertRaises(SystemExit):
             worker.cmd_test("python -c \"import sys; print('FAILURES: test_foo assert False'); sys.exit(1)\"", cwd=str(self.dir_path))
+
+    def test_graphify_query_mock(self):
+        # Create a mock graphify-out/graph.json
+        out_dir = self.dir_path / "graphify-out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        graph_data = {
+            "nodes": [
+                {"id": "AuthModule", "label": "AuthModule", "type": "class", "source_location": "auth.py:10"},
+                {"id": "UserDB", "label": "UserDB", "type": "class", "source_location": "db.py:20"}
+            ],
+            "edges": [
+                {"source": "AuthModule", "target": "UserDB", "relation": "queries"}
+            ]
+        }
+        (out_dir / "graph.json").write_text(json.dumps(graph_data), encoding="utf-8")
+
+        # Query should match and execute without errors
+        worker.cmd_graphify_query("AuthModule", path=str(self.dir_path))
 
 
 class TestConfig(unittest.TestCase):

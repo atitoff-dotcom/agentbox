@@ -112,6 +112,12 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
             worker.cmd_logs(args.get("task_id"), args.get("lines", 50), args.get("follow", False))
         elif action == "kill":
             worker.cmd_kill(args.get("task_id"))
+        elif action == "graphify_install":
+            worker.cmd_graphify_install(args.get("upgrade", False))
+        elif action == "graphify_build":
+            worker.cmd_graphify_build(args.get("path", "."), args.get("deep", False))
+        elif action == "graphify_query":
+            worker.cmd_graphify_query(args.get("question"), args.get("path", "."), args.get("max_tokens", 1500))
         else:
             print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
             return 1
