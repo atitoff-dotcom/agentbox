@@ -10,7 +10,7 @@ import argparse
 from typing import List, Optional
 
 from . import __version__
-from .config import get_config, save_global_config, save_local_config
+from .config import get_config, save_global_config, save_local_config, generate_rules
 from .client import execute_action
 
 
@@ -30,6 +30,10 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_cfg.add_argument("--set-host", help="Set default SSH host")
     p_cfg.add_argument("--set-cwd", help="Set default directory")
     p_cfg.add_argument("--global", dest="is_global", action="store_true", help="Save globally to ~/.agentbox/config.json")
+
+    # init-rules command
+    p_rules = sub.add_parser("init-rules", help="Generate AI agent rules (.cursorrules, AGENTS.md, CLAUDE.md) enforcing agentbox-only remote work")
+    p_rules.add_argument("--type", choices=["all", "cursor", "agents", "claude"], default="all", help="Target rule format (default: all)")
 
     # view
     p_view = sub.add_parser("view", help="View slice of file with line numbers")
@@ -146,6 +150,10 @@ def main(argv: Optional[List[str]] = None):
             print("Current configuration:")
             for k, v in cfg.items():
                 print(f"  {k}: {v}")
+        return 0
+
+    if args.cmd == "init-rules":
+        generate_rules(args.type)
         return 0
 
     host = args.host

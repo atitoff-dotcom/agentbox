@@ -235,18 +235,23 @@ agentbox graphify-query "Authentication and Token flow"
 
 ---
 
-## 🤖 System Prompt for AI Agents
+## 🤖 Enforce AI Agents to use AgentBox (`agentbox init-rules`)
 
-Add this rule to your project's `AGENTS.md` or `.cursorrules` to instruct your AI agent to use `agentbox`:
+Generate strict anti-token-waste rules for AI assistants (**Cursor, Claude Code, Antigravity, Windsurf, Roo-Code**) with a single command:
 
-```markdown
-## Remote & Local Execution (AgentBox)
-Always use `agentbox` for remote server operations to minimize token consumption:
-1. Use `agentbox outline <file>` before reading entire files.
-2. Use `agentbox get-fn <file> <name>` to read specific functions.
-3. Use `agentbox run "<command>"` for all builds, tests, and long commands.
-4. Use `agentbox patch <file> --old "..." --new "..."` for code modifications.
+```bash
+agentbox init-rules
+# Output: OK: Created AI rule files: .cursorrules, AGENTS.md, CLAUDE.md
 ```
+
+Or target a specific environment:
+```bash
+agentbox init-rules --type cursor   # generates .cursorrules
+agentbox init-rules --type agents   # generates AGENTS.md
+agentbox init-rules --type claude   # generates CLAUDE.md
+```
+
+This installs strict rules prohibiting the AI assistant from running noisy `cat`, `grep`, `find`, or raw test commands over SSH, forcing the use of token-efficient `agentbox` commands.
 
 ---
 

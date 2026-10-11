@@ -119,6 +119,22 @@ class TestConfig(unittest.TestCase):
         self.assertIn("host", cfg)
         self.assertIn("cwd", cfg)
 
+    def test_generate_rules(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            orig = os.getcwd()
+            try:
+                os.chdir(td)
+                config.generate_rules("all")
+                self.assertTrue(Path(".cursorrules").is_file())
+                self.assertTrue(Path("AGENTS.md").is_file())
+                self.assertTrue(Path("CLAUDE.md").is_file())
+                content = Path("AGENTS.md").read_text(encoding="utf-8")
+                self.assertIn("MANDATORY PROTOCOL", content)
+                self.assertIn("agentbox", content)
+            finally:
+                os.chdir(orig)
+
 
 if __name__ == "__main__":
     unittest.main()
