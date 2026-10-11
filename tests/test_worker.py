@@ -176,6 +176,8 @@ class TestConfig(unittest.TestCase):
                 content = Path("AGENTS.md").read_text(encoding="utf-8")
                 self.assertIn("MANDATORY PROTOCOL", content)
                 self.assertIn("agentbox", content)
+                self.assertIn("agentbox task", content)
+                self.assertIn("Task Auto-Memoization", content)
             finally:
                 os.chdir(orig)
 

@@ -37,3 +37,17 @@
 * `agentbox git-log [file] -n N` — ultra-compact 1-line commit log.
 * `agentbox git-view <file> [rev] --start N --end M` — views line slice from any Git revision without downloading full file.
 * `agentbox git-fn-history <file> <fn>` — traces AST modification history of a function across Git commits.
+
+#### 6. Project Tasks & Recipes (.agentbox.json)
+* `agentbox task` / `agentbox task list` — lists available project recipes and tasks.
+* `agentbox task <name> [args]` — executes saved task with optional argument substitution ({args} or appended).
+* `agentbox task add <name> "<cmd>"` — saves or updates a task recipe in project `.agentbox.json`.
+* `agentbox task rm <name>` — removes a task from `.agentbox.json`.
+
+<!-- AGENTBOX_TASKS_START -->
+<!-- AGENTBOX_TASKS_END -->
+
+### 🔄 Самообучение и рецепты (Task Auto-Memoization):
+Если в процессе работы потребовалось подобрать сложную или неочевидную команду проекта (подключение к БД, вызов внутреннего скрипта, миграция, перезапуск сервиса) — после её успешного выполнения ОБЯЗАТЕЛЬНО сохрани её как рецепт:
+`agentbox task add <name> "<command>"`
+и используй в дальнейшем `agentbox task <name>`, чтобы не подбирать параметры повторно.

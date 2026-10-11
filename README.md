@@ -307,6 +307,50 @@ Traces the AST modification history of a specific function across Git commits:
 agentbox git-fn-history src/auth.py verify_jwt -n 3
 ```
 
+### 6. Project Tasks & Recipes (`.agentbox.json`)
+
+Save recurring project commands and parameters (database connections, custom migrations, restart scripts) in `.agentbox.json` and execute them with a short recipe command:
+
+```json
+{
+  "host": "user@server",
+  "cwd": "/path/to/project",
+  "venv": "/path/to/project/.venv",
+  "tasks": {
+    "db": "PGPASSWORD=secret psql -h localhost -U user -d db -c {args}",
+    "migrate": "alembic upgrade head",
+    "check-all": "pytest && npm run check"
+  }
+}
+```
+
+#### List available tasks
+```bash
+agentbox task
+# or: agentbox task list
+```
+
+#### Run a task with optional arguments
+```bash
+agentbox task migrate
+# With argument substitution ({args} or $@):
+agentbox task db "SELECT * FROM users LIMIT 5;"
+# Or arguments appended cleanly:
+agentbox task check-all --verbose
+```
+
+#### Save or update a task recipe
+```bash
+agentbox task add db "PGPASSWORD=secret psql -h localhost -U user -d db -c {args}"
+# Output: OK: Task 'db' saved to .agentbox.json.
+```
+
+#### Remove a task recipe
+```bash
+agentbox task rm db
+# Output: OK: Task 'db' removed from .agentbox.json.
+```
+
 ---
 
 ## 🤖 Enforce AI Agents to use AgentBox (`agentbox init-rules`)

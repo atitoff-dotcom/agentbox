@@ -10,7 +10,7 @@ import argparse
 from typing import List, Optional
 
 from . import __version__
-from .config import get_config, save_global_config, save_local_config, generate_rules
+from .config import get_config, save_global_config, save_local_config, generate_rules, get_tasks, add_task, remove_task
 from .client import execute_action
 
 
@@ -36,6 +36,11 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # init-rules command
     p_rules = sub.add_parser("init-rules", help="Generate AI agent rules (.cursorrules, AGENTS.md, CLAUDE.md) enforcing agentbox-only remote work")
     p_rules.add_argument("--type", choices=["all", "cursor", "agents", "claude"], default="all", help="Target rule format (default: all)")
+
+    # task command
+    p_task = sub.add_parser("task", help="Project Tasks & Recipes: list, run, add, or remove task automation recipes")
+    p_task.add_argument("task_action", nargs="?", default=None, help="Task name, 'list', 'add', or 'rm' / 'remove'")
+    p_task.add_argument("task_args", nargs=argparse.REMAINDER, default=[], help="Arguments for the task or command definition for add")
 
     # view
     p_view = sub.add_parser("view", help="View slice of file with line numbers")
@@ -193,6 +198,82 @@ def main(argv: Optional[List[str]] = None):
     if args.cmd == "init-rules":
         generate_rules(args.type)
         return 0
+
+    if args.cmd == "task":
+        action = args.task_action
+        task_args = args.task_args or []
+
+        # 1. agentbox task / agentbox task list
+        if not action or action == "list":
+            tasks = get_tasks()
+            if not tasks:
+                print("No tasks defined in .agentbox.json.")
+                print("Add one with: agentbox task add <name> \"<command>\"")
+            else:
+                print(f"=== PROJECT TASKS ({len(tasks)}) ===")
+                for name, cmd_str in sorted(tasks.items()):
+                    print(f"  {name:15} : {cmd_str}")
+            return 0
+
+        # 2. agentbox task add <name> "<command>"
+        if action == "add":
+            if not task_args:
+                print("ERROR: Missing task name and command. Usage: agentbox task add <name> \"<command>\"", file=sys.stderr)
+                return 1
+            task_name = task_args[0]
+            if len(task_args) < 2:
+                print(f"ERROR: Missing command for task '{task_name}'. Usage: agentbox task add <name> \"<command>\"", file=sys.stderr)
+                return 1
+            cmd_str = " ".join(task_args[1:])
+            add_task(task_name, cmd_str)
+            print(f"OK: Task '{task_name}' saved to .agentbox.json.")
+            return 0
+
+        # 3. agentbox task rm / remove <name>
+        if action in ("rm", "remove"):
+            if not task_args:
+                print("ERROR: Missing task name. Usage: agentbox task rm <name>", file=sys.stderr)
+                return 1
+            task_name = task_args[0]
+            if remove_task(task_name):
+                print(f"OK: Task '{task_name}' removed from .agentbox.json.")
+                return 0
+            else:
+                print(f"ERROR: Task '{task_name}' not found in .agentbox.json.", file=sys.stderr)
+                return 1
+
+        # 4. agentbox task <name> [args...]
+        task_name = action
+        tasks = get_tasks()
+        if task_name not in tasks:
+            print(f"ERROR: Task '{task_name}' not found.", file=sys.stderr)
+            print("Run 'agentbox task' to see available tasks, or 'agentbox task add <name> \"<command>\"' to add it.", file=sys.stderr)
+            return 1
+
+        raw_cmd = tasks[task_name]
+        joined_args = " ".join(task_args)
+
+        if "{args}" in raw_cmd:
+            resolved_cmd = raw_cmd.replace("{args}", joined_args).strip()
+        elif "$@" in raw_cmd:
+            resolved_cmd = raw_cmd.replace("$@", joined_args).strip()
+        elif joined_args:
+            resolved_cmd = f"{raw_cmd} {joined_args}".strip()
+        else:
+            resolved_cmd = raw_cmd
+
+        # Silent execution pipeline via run action
+        host = args.host
+        cwd = args.cwd
+        venv = getattr(args, "cmd_venv", None) or getattr(args, "venv", None) or cfg.get("venv", "")
+        code = execute_action(host, cwd, "run", {
+            "cmd": resolved_cmd,
+            "cwd": cwd,
+            "tail": cfg.get("tail", 15),
+            "timeout": cfg.get("timeout", None),
+            "venv": venv
+        })
+        return code
 
     host = args.host
     cwd = args.cwd

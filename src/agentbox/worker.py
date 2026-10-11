@@ -635,9 +635,34 @@ def cmd_git_fn_history(path: str, name: str, limit: int = 3) -> None:
     print(f"OK: No git history found for '{name}' in {p.name}")
 
 
-def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv: str = None) -> None:
+def _get_log_dir() -> Path:
     log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir
+
+
+def _record_execution_stat(cmd_type: str, cmd_str: str, cwd: str, ret_code: int, duration_sec: float, venv_name: Optional[str] = None) -> None:
+    """Appends an execution record to history.jsonl for learning and heuristics."""
+    try:
+        log_dir = _get_log_dir()
+        history_file = log_dir / "history.jsonl"
+        record = {
+            "ts": int(time.time()),
+            "type": cmd_type,
+            "cmd": cmd_str,
+            "cwd": str(cwd),
+            "exit": ret_code,
+            "duration": round(duration_sec, 3),
+            "venv": venv_name or ""
+        }
+        with open(history_file, "a", encoding="utf-8") as hf:
+            hf.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv: str = None) -> None:
+    log_dir = _get_log_dir()
     task_id = f"task_{int(time.time() * 1000) % 1000000}"
     log_file = log_dir / f"{task_id}.log"
 
@@ -668,6 +693,7 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
 
     duration = time.time() - start_time
     dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
+    _record_execution_stat("run", cmd, str(work_dir), ret_code, duration, venv_dir.name if venv_dir else None)
 
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
@@ -870,6 +896,7 @@ def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30
 
     duration = time.time() - start_time
     dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
+    _record_execution_stat("test", cmd, str(work_dir), ret_code, duration, venv_dir.name if venv_dir else None)
 
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
