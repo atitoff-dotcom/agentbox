@@ -75,6 +75,24 @@ class TestWorker(unittest.TestCase):
             if log_file.is_file():
                 log_file.unlink()
 
+    def test_write_and_append(self):
+        new_file = self.dir_path / "created.txt"
+        worker.cmd_write(str(new_file), content="Hello AgentBox\n")
+        self.assertEqual(new_file.read_text(encoding="utf-8"), "Hello AgentBox\n")
+
+        # Test append
+        worker.cmd_write(str(new_file), content="Second Line\n", append=True)
+        self.assertEqual(new_file.read_text(encoding="utf-8"), "Hello AgentBox\nSecond Line\n")
+
+    def test_test_runner_success(self):
+        # A test command that succeeds
+        worker.cmd_test("python -c \"print('42 passed')\"", cwd=str(self.dir_path))
+
+    def test_test_runner_failure(self):
+        # A test command that fails
+        with self.assertRaises(SystemExit):
+            worker.cmd_test("python -c \"import sys; print('FAILURES: test_foo assert False'); sys.exit(1)\"", cwd=str(self.dir_path))
+
 
 class TestConfig(unittest.TestCase):
     def test_default_config(self):

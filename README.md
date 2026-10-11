@@ -129,6 +129,24 @@ error[E0308]: mismatched types
    |                 ^^^ expected `u8`, found `u16`
 ```
 
+#### `agentbox test "<test_command>"`
+Token-optimized test runner that suppresses passing tests and extracts high-signal failure tracebacks (pytest, cargo test, npm test):
+```bash
+agentbox test "pytest tests/"
+```
+*Output on success:*
+```text
+OK [tests passed in 1.45s] (12 passed) Log: /tmp/agent_logs/test_491823.log
+```
+*Output on failure (extracts traceback, saving up to 95% tokens):*
+```text
+FAILED [exit 1, 1.82s] Log: /tmp/agent_logs/test_491823.log
+--- High-Signal Failure Traceback ---
+>   assert result == 42
+E   AssertionError: assert 100 == 42
+tests/test_calc.py:15: AssertionError
+```
+
 #### `agentbox spawn "<command>"`
 Spawns a detached background task that survives SSH disconnects:
 ```bash
@@ -150,7 +168,15 @@ agentbox kill bg_849201
 
 ---
 
-### 3. Safe Atomic Patching
+### 3. File Operations & Safe Atomic Patching
+
+#### `agentbox write <file> [--content "..."] [--append]`
+Safely creates or appends to a file without any bash quote escaping issues (supports stdin streaming):
+```bash
+agentbox write src/settings.py --content 'DEBUG = True\nPORT = 8080'
+# Or via pipeline:
+cat config.json | agentbox write config.json
+```
 
 #### `agentbox patch <file> --old "<exact_code>" --new "<replacement>"`
 Safely replaces code with automatic `.bak` backup creation:

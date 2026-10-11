@@ -90,6 +90,8 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
             worker.cmd_outline(args.get("path"))
         elif action == "get_fn":
             worker.cmd_get_fn(args.get("path"), args.get("name"))
+        elif action == "write":
+            worker.cmd_write(args.get("path"), args.get("content"), args.get("append", False))
         elif action == "patch":
             worker.cmd_patch(args.get("path"), args.get("old"), args.get("new"), args.get("all", False))
         elif action == "rollback":
@@ -100,6 +102,8 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
             worker.cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20))
         elif action == "run":
             worker.cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"))
+        elif action == "test":
+            worker.cmd_test(args.get("cmd"), args.get("cwd"), args.get("timeout"), args.get("max_lines", 30))
         elif action == "spawn":
             worker.cmd_spawn(args.get("cmd"), args.get("cwd"))
         elif action == "status":

@@ -202,6 +202,24 @@ def cmd_rollback(path: str) -> None:
     print(f"OK: Restored {p.name} from backup and removed backup.")
 
 
+def cmd_write(path: str, content: str = None, append: bool = False) -> None:
+    """Safely writes or appends content to a file, reading from stdin if content is None."""
+    p = to_path(path)
+    if content is None:
+        content = sys.stdin.read()
+
+    p.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if append else "w"
+    try:
+        with open(p, mode, encoding="utf-8") as f:
+            f.write(content)
+        action_word = "Appended to" if append else "Wrote"
+        print(f"OK: {action_word} {p.name} ({len(content)} chars, {len(content.splitlines())} lines).")
+    except Exception as e:
+        print(f"ERROR: Failed writing to {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_tree(path: str = ".", max_depth: int = 2) -> None:
     root = to_path(path)
     if not root.exists():
@@ -373,6 +391,83 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None) -> N
         sys.exit(ret_code)
 
 
+def _extract_test_failures(lines: list, max_lines: int = 25) -> str:
+    """Extracts high-signal failure tracebacks and assertions from test runners."""
+    total = len(lines)
+    # Check for pytest / unittest FAILURES section
+    fail_idx = -1
+    for i, line in enumerate(lines):
+        if "FAILURES" in line or "=== ERRORS ===" in line or "failures:" in line.lower():
+            fail_idx = i
+            break
+
+    if fail_idx != -1:
+        extracted = lines[fail_idx:]
+        if len(extracted) > max_lines:
+            extracted = extracted[:max_lines] + ["\n... [truncated high-signal failure slice]\n"]
+        return "".join(extracted).strip()
+
+    # Fallback to tail
+    tail_slice = lines[-max_lines:] if total > max_lines else lines
+    return "".join(tail_slice).strip()
+
+
+def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30) -> None:
+    """Token-optimized test runner: silences passed output, extracts failure tracebacks."""
+    log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    task_id = f"test_{int(time.time() * 1000) % 1000000}"
+    log_file = log_dir / f"{task_id}.log"
+
+    work_dir = to_path(cwd)
+    start_time = time.time()
+
+    with open(log_file, "w", encoding="utf-8") as out:
+        out.write(f"=== Test Command: {cmd}\n=== CWD: {work_dir}\n=== Started: {time.ctime(start_time)}\n\n")
+        out.flush()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                shell=True,
+                cwd=str(work_dir),
+                stdout=out,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            proc.wait(timeout=timeout)
+            ret_code = proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            ret_code = -1
+            out.write("\n=== ERROR: Test timeout expired\n")
+
+    duration = time.time() - start_time
+    dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
+
+    with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    # Find summary line if available (e.g. '1 passed', '3 failed', 'test result: ok')
+    summary_line = ""
+    for line in reversed(lines[-20:]):
+        l_strip = line.strip()
+        if any(kw in l_strip.lower() for kw in ["passed", "failed", "test result", "ran "]):
+            summary_line = l_strip
+            break
+
+    if ret_code == 0:
+        verdict = f" ({summary_line})" if summary_line else ""
+        print(f"OK [tests passed in {dur_str}]{verdict} Log: {log_file}")
+    else:
+        failure_body = _extract_test_failures(lines, max_lines=max_lines)
+        print(f"FAILED [exit {ret_code}, {dur_str}] Log: {log_file}")
+        if summary_line:
+            print(f"Summary: {summary_line}")
+        print(f"--- High-Signal Failure Traceback ---")
+        print(failure_body)
+        sys.exit(ret_code)
+
+
 def cmd_spawn(cmd: str, cwd: str = None) -> None:
     log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -531,6 +626,8 @@ def handle_ipc_mode() -> None:
         cmd_outline(args.get("path"))
     elif action == "get_fn":
         cmd_get_fn(args.get("path"), args.get("name"))
+    elif action == "write":
+        cmd_write(args.get("path"), args.get("content"), args.get("append", False))
     elif action == "patch":
         cmd_patch(args.get("path"), args.get("old"), args.get("new"), args.get("all", False))
     elif action == "rollback":
@@ -541,6 +638,8 @@ def handle_ipc_mode() -> None:
         cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20))
     elif action == "run":
         cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"))
+    elif action == "test":
+        cmd_test(args.get("cmd"), args.get("cwd"), args.get("timeout"), args.get("max_lines", 30))
     elif action == "spawn":
         cmd_spawn(args.get("cmd"), args.get("cwd"))
     elif action == "status":
@@ -574,6 +673,11 @@ def main():
     p_fn.add_argument("path")
     p_fn.add_argument("name")
 
+    p_write = sub.add_parser("write")
+    p_write.add_argument("path")
+    p_write.add_argument("--content", default=None)
+    p_write.add_argument("--append", action="store_true")
+
     p_patch = sub.add_parser("patch")
     p_patch.add_argument("path")
     p_patch.add_argument("--old", required=True)
@@ -598,6 +702,12 @@ def main():
     p_run.add_argument("--tail", type=int, default=15)
     p_run.add_argument("--timeout", type=int, default=None)
 
+    p_test = sub.add_parser("test")
+    p_test.add_argument("command")
+    p_test.add_argument("--cwd", default=None)
+    p_test.add_argument("--max-lines", type=int, default=30)
+    p_test.add_argument("--timeout", type=int, default=None)
+
     p_spawn = sub.add_parser("spawn")
     p_spawn.add_argument("command")
     p_spawn.add_argument("--cwd", default=None)
@@ -621,6 +731,8 @@ def main():
         cmd_outline(args.path)
     elif args.cmd == "get-fn":
         cmd_get_fn(args.path, args.name)
+    elif args.cmd == "write":
+        cmd_write(args.path, args.content, args.append)
     elif args.cmd == "patch":
         cmd_patch(args.path, args.old, args.new, args.all)
     elif args.cmd == "rollback":
@@ -631,6 +743,8 @@ def main():
         cmd_grep(args.query, args.path, args.max)
     elif args.cmd == "run":
         cmd_run(args.command, args.cwd, args.tail, args.timeout)
+    elif args.cmd == "test":
+        cmd_test(args.command, args.cwd, args.timeout, args.max_lines)
     elif args.cmd == "spawn":
         cmd_spawn(args.command, args.cwd)
     elif args.cmd == "status":

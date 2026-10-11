@@ -42,9 +42,16 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_out.add_argument("path", help="Path to file (Python, Rust, JS, TS, C, Go)")
 
     # get-fn
+    # get-fn
     p_fn = sub.add_parser("get-fn", help="Extract specific function or class definition")
     p_fn.add_argument("path", help="Path to file")
     p_fn.add_argument("name", help="Name of function or class")
+
+    # write
+    p_write = sub.add_parser("write", help="Safely write or append content to file without bash quoting issues")
+    p_write.add_argument("path", help="Path to target file")
+    p_write.add_argument("--content", default=None, help="File content (reads from stdin if omitted)")
+    p_write.add_argument("--append", action="store_true", help="Append instead of overwrite")
 
     # patch
     p_patch = sub.add_parser("patch", help="Atomic find-and-replace with auto-backup")
@@ -73,6 +80,12 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_run.add_argument("command", help="Shell command to execute")
     p_run.add_argument("--tail", type=int, default=default_cfg.get("tail", 15), help="Lines of log tail to display")
     p_run.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
+
+    # test
+    p_test = sub.add_parser("test", help="High-signal test runner: silences passing tests, extracts tracebacks on failure")
+    p_test.add_argument("command", help="Test command to run (pytest, cargo test, npm test, etc.)")
+    p_test.add_argument("--max-lines", type=int, default=30, help="Max failure traceback lines to output")
+    p_test.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="Spawn detached background process (survives disconnects)")
@@ -129,6 +142,11 @@ def main(argv: Optional[List[str]] = None):
         code = execute_action(host, cwd, "outline", {"path": args.path})
     elif args.cmd == "get-fn":
         code = execute_action(host, cwd, "get_fn", {"path": args.path, "name": args.name})
+    elif args.cmd == "write":
+        content = args.content
+        if content is None and not sys.stdin.isatty():
+            content = sys.stdin.read()
+        code = execute_action(host, cwd, "write", {"path": args.path, "content": content, "append": args.append})
     elif args.cmd == "patch":
         code = execute_action(host, cwd, "patch", {"path": args.path, "old": args.old, "new": args.new, "all": args.all})
     elif args.cmd == "rollback":
@@ -139,6 +157,8 @@ def main(argv: Optional[List[str]] = None):
         code = execute_action(host, cwd, "grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
     elif args.cmd == "run":
         code = execute_action(host, cwd, "run", {"cmd": args.command, "cwd": cwd, "tail": args.tail, "timeout": args.timeout})
+    elif args.cmd == "test":
+        code = execute_action(host, cwd, "test", {"cmd": args.command, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines})
     elif args.cmd == "spawn":
         code = execute_action(host, cwd, "spawn", {"cmd": args.command, "cwd": cwd})
     elif args.cmd == "status":
