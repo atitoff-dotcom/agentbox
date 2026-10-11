@@ -53,26 +53,34 @@ pip install ai-agentbox
 
 ---
 
-## 🛠️ Quickstart
+## 🛠️ Quickstart: 3-Step Setup for Any Remote Project
 
-### 1. Configure Target (Optional)
+Follow this simple flow when starting a local workspace to work on an existing remote Linux server:
 
-Configure your remote SSH server once (stored in `.agentbox.json` or `~/.agentbox/config.json`):
-
+### Step 1: Install `ai-agentbox` locally
 ```bash
-agentbox config --set-host user@192.168.1.171 --set-cwd ~/my_project
+pip install ai-agentbox
 ```
 
-Or pass `--host` and `--cwd` directly to any command:
-
+### Step 2: Bind Remote Server & Generate AI Rules
+Run these two commands in your local project root:
 ```bash
-agentbox --host user@192.168.1.171 --cwd ~/my_project tree
-```
+# 1. Bind target SSH host and remote project path (stored in local .agentbox.json):
+agentbox config --set-host user@remote-server --set-cwd /home/user/my_project
 
-To run **locally**, simply omit the host:
-```bash
-agentbox tree
+# 2. Automatically generate strict anti-token-waste rules for your AI agent:
+agentbox init-rules
 ```
+*`init-rules` creates `.cursorrules`, `AGENTS.md`, and `CLAUDE.md`, strictly prohibiting the AI agent from using raw `cat`/`grep`/`pytest` over SSH and forcing `agentbox`.*
+
+### Step 3: Let AI Agent Work (Zero Setup on Remote Server!)
+Give any task to your AI assistant (**Cursor, Claude Code, Antigravity, Windsurf, Roo-Code**).
+
+When the agent executes any `agentbox` command (e.g. `agentbox tree` or `agentbox outline`):
+* AgentBox **automatically connects via SSH** to your Linux server.
+* Checks if `~/.agentbox_worker.py` exists and matches SHA-256 hash.
+* **Auto-deploys the zero-dependency worker to the server in milliseconds**.
+* You **never** have to log in to the remote server or install anything there manually!
 
 ---
 
