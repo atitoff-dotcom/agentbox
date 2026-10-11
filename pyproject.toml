@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentbox-cli"
+version = "0.1.0"
+description = "Token-efficient remote execution, AST outlining, and safe patching tool for AI agents."
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+keywords = ["ai", "agents", "llm", "tokens", "ssh", "ast", "cli", "remote-development"]
+authors = [
+    { name = "AgentBox Team" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "twine>=4.0",
+    "build>=1.0",
+]
+
+[project.scripts]
+agentbox = "agentbox.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/agentbox-cli/agentbox"
+Repository = "https://github.com/agentbox-cli/agentbox"
+Issues = "https://github.com/agentbox-cli/agentbox/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentbox"]
