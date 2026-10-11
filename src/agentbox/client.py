@@ -101,11 +101,11 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
         elif action == "grep":
             worker.cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20))
         elif action == "run":
-            worker.cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"))
+            worker.cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"), venv=args.get("venv"))
         elif action == "test":
-            worker.cmd_test(args.get("cmd"), args.get("cwd"), args.get("timeout"), args.get("max_lines", 30))
+            worker.cmd_test(args.get("cmd"), args.get("cwd"), args.get("timeout"), args.get("max_lines", 30), venv=args.get("venv"))
         elif action == "spawn":
-            worker.cmd_spawn(args.get("cmd"), args.get("cwd"))
+            worker.cmd_spawn(args.get("cmd"), args.get("cwd"), venv=args.get("venv"))
         elif action == "status":
             worker.cmd_status(args.get("task_id"))
         elif action == "logs":
@@ -115,9 +115,19 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
         elif action == "graphify_install":
             worker.cmd_graphify_install(args.get("upgrade", False))
         elif action == "graphify_build":
-            worker.cmd_graphify_build(args.get("path", "."), args.get("deep", False))
+            worker.cmd_graphify_build(args.get("path", "."), args.get("deep", False), venv=args.get("venv"))
         elif action == "graphify_query":
-            worker.cmd_graphify_query(args.get("question"), args.get("path", "."), args.get("max_tokens", 1500))
+            worker.cmd_graphify_query(args.get("question"), args.get("path", "."), args.get("max_tokens", 1500), venv=args.get("venv"))
+        elif action == "git_status":
+            worker.cmd_git_status(args.get("path", "."))
+        elif action == "diff":
+            worker.cmd_diff(args.get("path", ""), args.get("rev"), args.get("cached", False), args.get("max_lines", 100))
+        elif action == "git_log":
+            worker.cmd_git_log(args.get("path", ""), args.get("limit", 5))
+        elif action == "git_view":
+            worker.cmd_git_view(args.get("path"), args.get("rev", "HEAD"), args.get("start", 1), args.get("end", 100))
+        elif action == "git_fn_history":
+            worker.cmd_git_fn_history(args.get("path"), args.get("name"), args.get("limit", 3))
         else:
             print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
             return 1

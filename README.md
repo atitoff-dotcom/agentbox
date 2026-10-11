@@ -65,8 +65,10 @@ pip install ai-agentbox
 ### Step 2: Bind Remote Server & Generate AI Rules
 Run these two commands in your local project root:
 ```bash
-# 1. Bind target SSH host and remote project path (stored in local .agentbox.json):
+# 1. Bind target SSH host, remote project path, and optional virtualenv:
 agentbox config --set-host user@remote-server --set-cwd /home/user/my_project
+# Optional: explicitly set virtualenv path (otherwise .venv/venv is auto-detected!)
+agentbox config --set-venv /home/user/my_project/.venv
 
 # 2. Automatically generate strict anti-token-waste rules for your AI agent:
 agentbox init-rules
@@ -137,10 +139,22 @@ error[E0308]: mismatched types
    |                 ^^^ expected `u8`, found `u16`
 ```
 
-#### `agentbox test "<test_command>"`
-Token-optimized test runner that suppresses passing tests and extracts high-signal failure tracebacks (pytest, cargo test, npm test):
+#### `agentbox test "<test_command>" [--venv <path>]`
+Token-optimized test & type runner that suppresses passing tests and noise, extracting only high-signal failure tracebacks.
+Supports **Python** (`pytest`, `unittest`), **Rust** (`cargo test`), and **Frontend** (`svelte-check`, `tsc`, `eslint`, `vitest`, `pnpm check`).
+
+> [!TIP]
+> **Frontend & Svelte 5 / TypeScript Support**: Running `agentbox test "pnpm check"` or `agentbox test "pnpm svelte-check"` automatically strips noisy compilation banners and stylistic warnings, highlighting only real type errors, file locations, and failure code snippets!
+
+> [!TIP]
+> **Automatic Virtualenv Detection**: AgentBox automatically checks for `.venv` or `venv` in your working directory and parent project directories, prefixing `PATH="$VENV/bin:$PATH"` so tools like `pytest` and `granian` work instantly without full paths! You can also pass `--venv /path/to/venv` or set it in config (`agentbox config --set-venv /path`).
+
 ```bash
+# Automatically finds .venv / venv:
 agentbox test "pytest tests/"
+
+# Or with explicit virtualenv:
+agentbox test "pytest tests/" --venv /home/alex/pl3_2/.venv
 ```
 *Output on success:*
 ```text
@@ -239,6 +253,58 @@ agentbox graphify-build
 Queries graph structure, relationships, and God nodes directly on the host, returning token-capped answers (~150 tokens instead of dumping megabytes of JSON):
 ```bash
 agentbox graphify-query "Authentication and Token flow"
+```
+
+---
+
+### 6. Token-Efficient Git History & Changes
+
+Agents waste thousands of tokens downloading full files just to see what changed or inspect past implementations:
+
+#### `agentbox git-status [path]`
+Compact status showing only modified and untracked files with `(+add, -del)` count in a few clean lines:
+```bash
+agentbox git-status
+```
+*Output (~25 tokens vs 500+):*
+```text
+=== GIT STATUS: 3 changed files ===
+  M   src/auth.py (+12, -3)
+  M   src/config.py (+2, -0)
+  ??  tests/test_auth_new.py
+```
+
+#### `agentbox diff [path] [--rev <rev>] [--cached] [--max-lines N]`
+Token-optimized diff that automatically ignores lockfiles (`package-lock.json`, `poetry.lock`, `Cargo.lock`), strips formatting whitespace noise (`-w`), and caps output to avoid context overflow:
+```bash
+agentbox diff src/auth.py
+# Or compare against a commit:
+agentbox diff --rev HEAD~1
+```
+
+#### `agentbox git-log [path] [-n N]`
+Ultra-compact one-line commit history:
+```bash
+agentbox git-log -n 5
+```
+*Output (~30 tokens vs 2,000+):*
+```text
+=== GIT LOG: repository (last 3 commits) ===
+df71336 (2 hours ago) docs: add AGENT.md, AGENTS.md <atitoff>
+0508bc0 (3 hours ago) fix: update project URLs <atitoff>
+2937539 (4 hours ago) feat: initial commit <atitoff>
+```
+
+#### `agentbox git-view <file> [rev] [--start N --end M]`
+Extracts an exact slice of lines from any Git revision without downloading the entire 800-line historical file:
+```bash
+agentbox git-view src/auth.py HEAD~1 --start 20 --end 45
+```
+
+#### `agentbox git-fn-history <file> <function_name> [-n N]`
+Traces the AST modification history of a specific function across Git commits:
+```bash
+agentbox git-fn-history src/auth.py verify_jwt -n 3
 ```
 
 ---

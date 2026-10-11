@@ -9,6 +9,7 @@
 2. DO NOT search files using raw find/grep: never use `find .` or raw `grep` -> USE `agentbox tree` or `agentbox grep "<query>"`.
 3. DO NOT stream noisy builds or tests: never run raw `pytest`, `cargo build`, or `npm test` -> USE `agentbox test "<cmd>"` or `agentbox run "<cmd>"`.
 4. DO NOT write files via `cat << 'EOF'`: bash escaping often breaks quotes and symbols -> USE `agentbox write <file>` or `agentbox patch <file>`.
+5. DO NOT dump raw git diff or log: never run raw `git diff` or `git log -p` -> USE `agentbox diff` or `agentbox git-log` / `agentbox git-view`.
 
 ### ✅ MANDATORY AGENTBOX CLI TOOLSET:
 
@@ -23,9 +24,16 @@
 * `agentbox rollback <file>` — restores from backup if an edit caused errors.
 
 #### 3. Silent Builds, Tests & Background Tasks
-* `agentbox test "<test_cmd>"` — silent test runner; suppresses passing tests and extracts high-signal failure tracebacks.
-* `agentbox run "<build_cmd>"` — suppresses intermediate noisy terminal stream, buffering to log.
-* `agentbox spawn "<cmd>"` / `agentbox status <id>` / `agentbox logs <id> -f` — detached background tasks.
+* `agentbox test "<test_cmd>"` — silent test runner; suppresses passing tests and extracts high-signal failure tracebacks (auto-detects .venv/venv or --venv).
+* `agentbox run "<build_cmd>"` — suppresses intermediate noisy terminal stream, buffering to log (auto-detects .venv/venv or --venv).
+* `agentbox spawn "<cmd>"` / `agentbox status <id>` / `agentbox logs <id> -f` — detached background tasks (auto-detects .venv/venv or --venv).
 
 #### 4. Architecture & Knowledge Graph
 * `agentbox graphify-query "<question>"` — queries code connections and God nodes directly on host without dumping large JSON.
+
+#### 5. Token-Efficient Git History & Changes
+* `agentbox git-status` — compact changed file status with (+add, -del) counts.
+* `agentbox diff [file]` — noise-free diff (ignores lockfiles and whitespace changes).
+* `agentbox git-log [file] -n N` — ultra-compact 1-line commit log.
+* `agentbox git-view <file> [rev] --start N --end M` — views line slice from any Git revision without downloading full file.
+* `agentbox git-fn-history <file> <fn>` — traces AST modification history of a function across Git commits.

@@ -58,3 +58,6 @@ coverage.xml
 # OS generated
 .DS_Store
 Thumbs.db
+
+# AgentBox local project config
+.agentbox.json

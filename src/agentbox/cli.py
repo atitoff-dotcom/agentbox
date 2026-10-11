@@ -22,13 +22,15 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("--host", default=default_cfg.get("host", ""), help="Target SSH host (e.g. user@server, or empty for local)")
     parser.add_argument("--cwd", default=default_cfg.get("cwd", ""), help="Target working directory")
+    parser.add_argument("--venv", default=None, help="Target virtualenv path (auto-detected if omitted)")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # config command
-    p_cfg = sub.add_parser("config", help="View or update host and directory settings")
+    p_cfg = sub.add_parser("config", help="View or update host, directory, and virtualenv settings")
     p_cfg.add_argument("--set-host", help="Set default SSH host")
     p_cfg.add_argument("--set-cwd", help="Set default directory")
+    p_cfg.add_argument("--set-venv", help="Set default virtualenv path (or empty string to clear)")
     p_cfg.add_argument("--global", dest="is_global", action="store_true", help="Save globally to ~/.agentbox/config.json")
 
     # init-rules command
@@ -82,18 +84,21 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # run
     p_run = sub.add_parser("run", help="Silent execution: suppresses noise, buffers to log, notifies on completion")
     p_run.add_argument("command", help="Shell command to execute")
+    p_run.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
     p_run.add_argument("--tail", type=int, default=default_cfg.get("tail", 15), help="Lines of log tail to display")
     p_run.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
 
     # test
     p_test = sub.add_parser("test", help="High-signal test runner: silences passing tests, extracts tracebacks on failure")
     p_test.add_argument("command", help="Test command to run (pytest, cargo test, npm test, etc.)")
+    p_test.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
     p_test.add_argument("--max-lines", type=int, default=30, help="Max failure traceback lines to output")
     p_test.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="Spawn detached background process (survives disconnects)")
     p_spawn.add_argument("command", help="Shell command to spawn")
+    p_spawn.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
 
     # status
     p_stat = sub.add_parser("status", help="Check status of background task")
@@ -116,13 +121,44 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # graphify-build
     p_gb = sub.add_parser("graphify-build", help="Build knowledge graph of target project silently")
     p_gb.add_argument("path", nargs="?", default="", help="Project path to build graph for")
+    p_gb.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path")
     p_gb.add_argument("--deep", action="store_true", help="Run deep extraction mode")
 
     # graphify-query
     p_gq = sub.add_parser("graphify-query", help="Query knowledge graph without blowing LLM token budget")
     p_gq.add_argument("question", help="Natural language query or concept name")
     p_gq.add_argument("path", nargs="?", default="", help="Project path with graphify-out")
+    p_gq.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path")
     p_gq.add_argument("--max-tokens", type=int, default=1500, help="Max token output budget")
+
+    # git-status
+    p_gs = sub.add_parser("git-status", help="Compact git status showing changed files and diff counts")
+    p_gs.add_argument("path", nargs="?", default="", help="Path or directory (default: repo root)")
+
+    # diff
+    p_diff = sub.add_parser("diff", help="Token-efficient git diff ignoring whitespace and lockfiles")
+    p_diff.add_argument("path", nargs="?", default="", help="Path to file or directory")
+    p_diff.add_argument("--rev", default=None, help="Git revision or range (e.g. HEAD~1, main..HEAD)")
+    p_diff.add_argument("--cached", "--staged", dest="cached", action="store_true", help="View staged changes")
+    p_diff.add_argument("--max-lines", type=int, default=100, help="Max diff output lines (default: 100)")
+
+    # git-log
+    p_gl = sub.add_parser("git-log", help="Compact one-line git commit history")
+    p_gl.add_argument("path", nargs="?", default="", help="Path to file or directory")
+    p_gl.add_argument("-n", "--limit", type=int, default=5, help="Number of commits (default: 5)")
+
+    # git-view
+    p_gv = sub.add_parser("git-view", help="View line slice of a file from any Git revision without downloading full file")
+    p_gv.add_argument("path", help="Path to file")
+    p_gv.add_argument("rev", nargs="?", default="HEAD", help="Git revision (commit hash, branch, or HEAD~N, default: HEAD)")
+    p_gv.add_argument("--start", type=int, default=1, help="Start line (default: 1)")
+    p_gv.add_argument("--end", type=int, default=100, help="End line (default: 100)")
+
+    # git-fn-history
+    p_gfh = sub.add_parser("git-fn-history", help="Trace modification history of a specific function or class across Git commits")
+    p_gfh.add_argument("path", help="Path to file")
+    p_gfh.add_argument("name", help="Name of function or class")
+    p_gfh.add_argument("-n", "--limit", type=int, default=3, help="Max revisions to inspect (default: 3)")
 
     return parser
 
@@ -138,6 +174,8 @@ def main(argv: Optional[List[str]] = None):
             updates["host"] = args.set_host
         if args.set_cwd is not None:
             updates["cwd"] = args.set_cwd
+        if args.set_venv is not None:
+            updates["venv"] = args.set_venv
 
         if updates:
             if args.is_global:
@@ -158,6 +196,7 @@ def main(argv: Optional[List[str]] = None):
 
     host = args.host
     cwd = args.cwd
+    venv = getattr(args, "cmd_venv", None) or getattr(args, "venv", None) or cfg.get("venv", "")
 
     if args.cmd == "view":
         code = execute_action(host, cwd, "view", {"path": args.path, "start": args.start, "end": args.end})
@@ -179,11 +218,11 @@ def main(argv: Optional[List[str]] = None):
     elif args.cmd == "grep":
         code = execute_action(host, cwd, "grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
     elif args.cmd == "run":
-        code = execute_action(host, cwd, "run", {"cmd": args.command, "cwd": cwd, "tail": args.tail, "timeout": args.timeout})
+        code = execute_action(host, cwd, "run", {"cmd": args.command, "cwd": cwd, "tail": args.tail, "timeout": args.timeout, "venv": venv})
     elif args.cmd == "test":
-        code = execute_action(host, cwd, "test", {"cmd": args.command, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines})
+        code = execute_action(host, cwd, "test", {"cmd": args.command, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
     elif args.cmd == "spawn":
-        code = execute_action(host, cwd, "spawn", {"cmd": args.command, "cwd": cwd})
+        code = execute_action(host, cwd, "spawn", {"cmd": args.command, "cwd": cwd, "venv": venv})
     elif args.cmd == "status":
         code = execute_action(host, cwd, "status", {"task_id": args.task_id})
     elif args.cmd == "logs":
@@ -193,9 +232,19 @@ def main(argv: Optional[List[str]] = None):
     elif args.cmd == "graphify-install":
         code = execute_action(host, cwd, "graphify_install", {"upgrade": args.upgrade})
     elif args.cmd == "graphify-build":
-        code = execute_action(host, cwd, "graphify_build", {"path": args.path or cwd, "deep": args.deep})
+        code = execute_action(host, cwd, "graphify_build", {"path": args.path or cwd, "deep": args.deep, "venv": venv})
     elif args.cmd == "graphify-query":
-        code = execute_action(host, cwd, "graphify_query", {"question": args.question, "path": args.path or cwd, "max_tokens": args.max_tokens})
+        code = execute_action(host, cwd, "graphify_query", {"question": args.question, "path": args.path or cwd, "max_tokens": args.max_tokens, "venv": venv})
+    elif args.cmd == "git-status":
+        code = execute_action(host, cwd, "git_status", {"path": args.path or cwd})
+    elif args.cmd == "diff":
+        code = execute_action(host, cwd, "diff", {"path": args.path or cwd, "rev": args.rev, "cached": args.cached, "max_lines": args.max_lines})
+    elif args.cmd == "git-log":
+        code = execute_action(host, cwd, "git_log", {"path": args.path or cwd, "limit": args.limit})
+    elif args.cmd == "git-view":
+        code = execute_action(host, cwd, "git_view", {"path": args.path, "rev": args.rev, "start": args.start, "end": args.end})
+    elif args.cmd == "git-fn-history":
+        code = execute_action(host, cwd, "git_fn_history", {"path": args.path, "name": args.name, "limit": args.limit})
     else:
         code = 1
 
