@@ -13,6 +13,7 @@ import ast
 import json
 import time
 import signal
+import shutil
 import subprocess
 import argparse
 from pathlib import Path
@@ -231,11 +232,8 @@ def cmd_tree(path: str = ".", max_depth: int = 2) -> None:
             print(f"{sub_indent}... and {len(visible_files) - 15} more files")
 
 
-def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
-    root = to_path(path)
+def _grep_python(pattern: re.Pattern, root: Path, max_results: int) -> None:
     count = 0
-    pattern = re.compile(query, re.IGNORECASE)
-
     for cur_root, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS]
         for f in files:
@@ -246,7 +244,10 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
                 with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
                     for idx, line in enumerate(fh, start=1):
                         if pattern.search(line):
-                            rel = fpath.relative_to(root)
+                            try:
+                                rel = fpath.relative_to(root)
+                            except ValueError:
+                                rel = fpath
                             print(f"{rel}:{idx} | {line.strip()[:120]}")
                             count += 1
                             if count >= max_results:
@@ -254,6 +255,73 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
                                 return
             except Exception:
                 pass
+
+
+def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
+    root = to_path(path)
+    if not root.exists():
+        print(f"ERROR: Path not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Check for ripgrep (rg) adaptive acceleration
+    rg_bin = shutil.which("rg")
+    if rg_bin:
+        rg_cmd = [
+            rg_bin,
+            "-i",
+            "--line-number",
+            "--no-heading",
+            "--color", "never",
+            f"--max-count={max_results}",
+        ]
+        for ign in DEFAULT_IGNORED_DIRS:
+            rg_cmd.extend(["-g", f"!{ign}"])
+        rg_cmd.extend([query, str(root)])
+
+        try:
+            proc = subprocess.Popen(
+                rg_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace"
+            )
+            count = 0
+            if proc.stdout:
+                for line in proc.stdout:
+                    line = line.rstrip("\r\n")
+                    if not line:
+                        continue
+                    # format: /abs/path:line:content or rel/path:line:content
+                    parts = line.split(":", 2)
+                    if len(parts) >= 3:
+                        match_path, line_no, content = parts[0], parts[1], parts[2]
+                        try:
+                            rel = Path(match_path).relative_to(root)
+                        except ValueError:
+                            rel = Path(match_path)
+                        print(f"{rel}:{line_no} | {content.strip()[:120]}")
+                    else:
+                        print(line[:120])
+
+                    count += 1
+                    if count >= max_results:
+                        print(f"... [stopped at max {max_results} results]")
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=0.5)
+                        except Exception:
+                            pass
+                        return
+            proc.wait()
+            return
+        except Exception:
+            # Fallback to pure Python search on any rg execution issue
+            pass
+
+    pattern = re.compile(query, re.IGNORECASE)
+    _grep_python(pattern, root, max_results)
 
 
 def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None) -> None:
@@ -401,6 +469,51 @@ def cmd_kill(task_id: str) -> None:
         print(f"ERROR: Failed to kill PID {pid}: {e}", file=sys.stderr)
 
 
+def cmd_logs(task_id: str, lines: int = 50, follow: bool = False) -> None:
+    log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
+    meta_file = log_dir / f"{task_id}.json"
+    log_file = log_dir / f"{task_id}.log"
+
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            if "log_file" in meta:
+                log_file = Path(meta["log_file"])
+        except Exception:
+            pass
+
+    if not log_file.is_file():
+        print(f"ERROR: Log file for task {task_id} not found at {log_file}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+            if lines > 0:
+                all_lines = f.readlines()
+                for line in all_lines[-lines:]:
+                    sys.stdout.write(line)
+                sys.stdout.flush()
+            else:
+                f.seek(0, os.SEEK_END)
+
+            if not follow:
+                return
+
+            # Follow / streaming mode (tail -f)
+            while True:
+                line = f.readline()
+                if line:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                else:
+                    time.sleep(0.2)
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"ERROR: Failed reading log: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def handle_ipc_mode() -> None:
     """Reads a JSON request from stdin and executes it without bash shell escaping."""
     try:
@@ -432,6 +545,8 @@ def handle_ipc_mode() -> None:
         cmd_spawn(args.get("cmd"), args.get("cwd"))
     elif action == "status":
         cmd_status(args.get("task_id"))
+    elif action == "logs":
+        cmd_logs(args.get("task_id"), args.get("lines", 50), args.get("follow", False))
     elif action == "kill":
         cmd_kill(args.get("task_id"))
     else:
@@ -490,6 +605,11 @@ def main():
     p_stat = sub.add_parser("status")
     p_stat.add_argument("task_id")
 
+    p_logs = sub.add_parser("logs")
+    p_logs.add_argument("task_id")
+    p_logs.add_argument("-n", "--lines", type=int, default=50)
+    p_logs.add_argument("-f", "--follow", action="store_true")
+
     p_kill = sub.add_parser("kill")
     p_kill.add_argument("task_id")
 
@@ -515,6 +635,8 @@ def main():
         cmd_spawn(args.command, args.cwd)
     elif args.cmd == "status":
         cmd_status(args.task_id)
+    elif args.cmd == "logs":
+        cmd_logs(args.task_id, args.lines, args.follow)
     elif args.cmd == "kill":
         cmd_kill(args.task_id)
 

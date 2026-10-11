@@ -138,6 +138,12 @@ agentbox spawn "python3 train_model.py"
 agentbox status bg_849201
 # Output: TASK: bg_849201 | Status: RUNNING | PID: 4215 | Runtime: 1m 24s
 
+agentbox logs bg_849201 -n 20
+# Output: displays last 20 lines of log
+
+agentbox logs bg_849201 -f
+# Output: live real-time log streaming (tail -f)
+
 agentbox kill bg_849201
 # Output: OK: Task bg_849201 (PID 4215) terminated.
 ```

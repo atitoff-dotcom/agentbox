@@ -55,6 +55,26 @@ class TestWorker(unittest.TestCase):
         with self.assertRaises(SystemExit):
             worker.cmd_run("exit 42", cwd=str(self.dir_path), tail=5)
 
+    def test_grep(self):
+        f = self.dir_path / "code.py"
+        f.write_text("def find_me_secret():\n    pass\n", encoding="utf-8")
+        # Should not raise exception
+        worker.cmd_grep("find_me_secret", path=str(self.dir_path), max_results=10)
+
+    def test_logs_read(self):
+        # Create a dummy task log and meta
+        log_dir = Path("/tmp/agent_logs") if os.name != "nt" else Path(os.environ.get("TEMP", ".")) / "agent_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        task_id = "test_task_999"
+        log_file = log_dir / f"{task_id}.log"
+        log_file.write_text("line 1\nline 2\nline 3\n", encoding="utf-8")
+
+        try:
+            worker.cmd_logs(task_id, lines=2, follow=False)
+        finally:
+            if log_file.is_file():
+                log_file.unlink()
+
 
 class TestConfig(unittest.TestCase):
     def test_default_config(self):

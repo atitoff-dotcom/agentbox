@@ -66,8 +66,11 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any]) -> in
 
     payload = json.dumps({"action": action, "args": args})
     cmd = ["ssh", host, f"python3 {REMOTE_WORKER_PATH} --ipc"]
-    proc = subprocess.run(cmd, input=payload, text=True)
-    return proc.returncode
+    try:
+        proc = subprocess.run(cmd, input=payload, text=True)
+        return proc.returncode
+    except KeyboardInterrupt:
+        return 0
 
 
 def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
@@ -101,11 +104,15 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
             worker.cmd_spawn(args.get("cmd"), args.get("cwd"))
         elif action == "status":
             worker.cmd_status(args.get("task_id"))
+        elif action == "logs":
+            worker.cmd_logs(args.get("task_id"), args.get("lines", 50), args.get("follow", False))
         elif action == "kill":
             worker.cmd_kill(args.get("task_id"))
         else:
             print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
             return 1
+        return 0
+    except KeyboardInterrupt:
         return 0
     except SystemExit as se:
         return se.code if isinstance(se.code, int) else 1

@@ -82,6 +82,12 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_stat = sub.add_parser("status", help="Check status of background task")
     p_stat.add_argument("task_id", help="Task ID from spawn command")
 
+    # logs / tail
+    p_logs = sub.add_parser("logs", help="View or stream log output of background task")
+    p_logs.add_argument("task_id", help="Task ID from spawn command")
+    p_logs.add_argument("-n", "--lines", type=int, default=50, help="Number of trailing lines (default: 50)")
+    p_logs.add_argument("-f", "--follow", action="store_true", help="Continuously stream new log output (tail -f)")
+
     # kill
     p_kill = sub.add_parser("kill", help="Terminate background task")
     p_kill.add_argument("task_id", help="Task ID from spawn command")
@@ -137,6 +143,8 @@ def main(argv: Optional[List[str]] = None):
         code = execute_action(host, cwd, "spawn", {"cmd": args.command, "cwd": cwd})
     elif args.cmd == "status":
         code = execute_action(host, cwd, "status", {"task_id": args.task_id})
+    elif args.cmd == "logs":
+        code = execute_action(host, cwd, "logs", {"task_id": args.task_id, "lines": args.lines, "follow": args.follow})
     elif args.cmd == "kill":
         code = execute_action(host, cwd, "kill", {"task_id": args.task_id})
     else:
