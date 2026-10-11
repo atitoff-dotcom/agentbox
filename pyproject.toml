@@ -41,9 +41,9 @@ dev = [
 agentbox = "agentbox.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/agentbox-cli/agentbox"
-Repository = "https://github.com/agentbox-cli/agentbox"
-Issues = "https://github.com/agentbox-cli/agentbox/issues"
+Homepage = "https://github.com/atitoff-dotcom/agentbox"
+Repository = "https://github.com/atitoff-dotcom/agentbox"
+Issues = "https://github.com/atitoff-dotcom/agentbox/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentbox"]
