@@ -1,6 +1,6 @@
-# 📦 AgentBox (`agentbox-cli`)
+# 📦 AgentBox (`ai-agentbox`)
 
-[![PyPI version](https://img.shields.io/pypi/v/agentbox-cli.svg)](https://pypi.org/project/agentbox-cli/)
+[![PyPI version](https://img.shields.io/pypi/v/ai-agentbox.svg)](https://pypi.org/project/ai-agentbox/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies)
@@ -39,7 +39,7 @@ AgentBox provides a **Client $\leftrightarrow$ Worker** architecture that reduce
 * **Zero External Dependencies**: Built entirely on the Python 3 standard library.
 * **Self-Bootstrapping Worker**: When targeting a remote SSH server, AgentBox automatically verifies, hashes, and deploys its standalone worker in milliseconds.
 * **Silent Task Runner**: Suppresses intermediate stdout noise, streams to a local log file, and returns only execution time, exit code, and failure tail.
-* **Background Process Manager**: Detached process spawning (`spawn`, `status`, `kill`) that survives SSH disconnections.
+* **Background Process Manager**: Detached process spawning (`spawn`, `status`, `logs`, `kill`) that survives SSH disconnections.
 * **AST-Powered Skeletons**: Extracts class and function signatures for Python, Rust, JavaScript, TypeScript, C/C++, and Go.
 * **Escape-Proof Atomic Patching**: Sends replacement payloads over stdin IPC streams, eliminating bash quote escaping bugs forever.
 
@@ -48,7 +48,7 @@ AgentBox provides a **Client $\leftrightarrow$ Worker** architecture that reduce
 ## 📦 Installation
 
 ```bash
-pip install agentbox-cli
+pip install ai-agentbox
 ```
 
 ---
