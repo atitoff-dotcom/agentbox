@@ -113,6 +113,49 @@ class TestImprovements(unittest.TestCase):
                 self.assertEqual(ret, 0)
                 mock_exec.assert_called_once_with("", "", "write", {"path": "test.txt", "content": "stdin content", "append": False})
 
+    def test_cli_run_test_spawn_multi_tokens(self):
+        # 1. Multi-token command with flags in run
+        with patch.object(cli, "execute_action", return_value=0) as mock_exec:
+            ret = cli.main(["run", "python", "-c", "import pyferro; print(pyferro.__file__)"])
+            self.assertEqual(ret, 0)
+            mock_exec.assert_called_once_with(
+                "", "", "run",
+                {"cmd": "python -c import pyferro; print(pyferro.__file__)", "cwd": "", "tail": 15, "timeout": 300, "venv": ""}
+            )
+
+        # 2. Multi-token command with flags in test
+        with patch.object(cli, "execute_action", return_value=0) as mock_exec:
+            ret = cli.main(["test", "pytest", "-k", "test_foo", "-v"])
+            self.assertEqual(ret, 0)
+            mock_exec.assert_called_once_with(
+                "", "", "test",
+                {"cmd": "pytest -k test_foo -v", "cwd": "", "timeout": 300, "max_lines": 30, "venv": ""}
+            )
+
+        # 3. Multi-token command in spawn
+        with patch.object(cli, "execute_action", return_value=0) as mock_exec:
+            ret = cli.main(["spawn", "python", "server.py", "--port", "8080"])
+            self.assertEqual(ret, 0)
+            mock_exec.assert_called_once_with(
+                "", "", "spawn",
+                {"cmd": "python server.py --port 8080", "cwd": "", "venv": ""}
+            )
+
+        # 4. run with agentbox options preceding command
+        with patch.object(cli, "execute_action", return_value=0) as mock_exec:
+            ret = cli.main(["run", "--tail", "25", "pytest", "-v"])
+            self.assertEqual(ret, 0)
+            mock_exec.assert_called_once_with(
+                "", "", "run",
+                {"cmd": "pytest -v", "cwd": "", "tail": 25, "timeout": 300, "venv": ""}
+            )
+
+        # 5. Missing command returns error code 1
+        with patch("sys.stderr", new=StringIO()) as err:
+            ret = cli.main(["run"])
+            self.assertEqual(ret, 1)
+            self.assertIn("ERROR: Missing command to execute", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

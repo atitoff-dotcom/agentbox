@@ -7,7 +7,7 @@ Entry point for 'agentbox' executable installed via pip.
 
 import sys
 import argparse
-from typing import List, Optional
+from typing import List, Optional, Any, Union
 
 if sys.platform == "win32":
     try:
@@ -21,8 +21,70 @@ from .config import get_config, save_global_config, save_local_config, generate_
 from .client import execute_action
 
 
+class AgentBoxParser(argparse.ArgumentParser):
+    """Custom parser that allows flexible command trailing flags for run, test, spawn."""
+    def parse_args(self, args=None, namespace=None):
+        res = super().parse_args(args, namespace)
+        if getattr(res, "cmd", None) in ("run", "test", "spawn") and hasattr(res, "command"):
+            cmd_list = res.command or []
+            new_cmd = []
+            i = 0
+            while i < len(cmd_list):
+                token = cmd_list[i]
+                if token == "--":
+                    new_cmd.extend(cmd_list[i + 1:])
+                    break
+                elif token == "--venv" and i + 1 < len(cmd_list):
+                    res.cmd_venv = cmd_list[i + 1]
+                    i += 2
+                elif token.startswith("--venv="):
+                    res.cmd_venv = token.split("=", 1)[1]
+                    i += 1
+                elif token == "--tail" and i + 1 < len(cmd_list):
+                    try:
+                        res.tail = int(cmd_list[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif token.startswith("--tail="):
+                    try:
+                        res.tail = int(token.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                    i += 1
+                elif token == "--timeout" and i + 1 < len(cmd_list):
+                    try:
+                        res.timeout = int(cmd_list[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif token.startswith("--timeout="):
+                    try:
+                        res.timeout = int(token.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                    i += 1
+                elif token in ("--max-lines", "--max_lines") and i + 1 < len(cmd_list):
+                    try:
+                        res.max_lines = int(cmd_list[i + 1])
+                    except ValueError:
+                        pass
+                    i += 2
+                elif token.startswith("--max-lines=") or token.startswith("--max_lines="):
+                    try:
+                        res.max_lines = int(token.split("=", 1)[1])
+                    except ValueError:
+                        pass
+                    i += 1
+                else:
+                    new_cmd.append(token)
+                    i += 1
+            res.command = new_cmd
+        return res
+
+
 def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = AgentBoxParser(
         prog="agentbox",
         description=f"AgentBox v{__version__} — Token-efficient execution and AST code tools for AI agents."
     )
@@ -96,22 +158,22 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
 
     # run
     p_run = sub.add_parser("run", help="Silent execution: suppresses noise, buffers to log, notifies on completion")
-    p_run.add_argument("command", help="Shell command to execute")
     p_run.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
     p_run.add_argument("--tail", type=int, default=default_cfg.get("tail", 15), help="Lines of log tail to display")
     p_run.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
+    p_run.add_argument("command", nargs=argparse.REMAINDER, help="Shell command to execute")
 
     # test
     p_test = sub.add_parser("test", help="High-signal test runner: silences passing tests, extracts tracebacks on failure")
-    p_test.add_argument("command", help="Test command to run (pytest, cargo test, npm test, etc.)")
     p_test.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
     p_test.add_argument("--max-lines", type=int, default=30, help="Max failure traceback lines to output")
     p_test.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
+    p_test.add_argument("command", nargs=argparse.REMAINDER, help="Test command to run (pytest, cargo test, npm test, etc.)")
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="Spawn detached background process (survives disconnects)")
-    p_spawn.add_argument("command", help="Shell command to spawn")
     p_spawn.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path (overrides auto-detection)")
+    p_spawn.add_argument("command", nargs=argparse.REMAINDER, help="Shell command to spawn")
 
     # status
     p_stat = sub.add_parser("status", help="Check status of background task")
@@ -174,6 +236,15 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_gfh.add_argument("-n", "--limit", type=int, default=3, help="Max revisions to inspect (default: 3)")
 
     return parser
+
+
+def _resolve_cmd_string(cmd_arg: Any) -> str:
+    """Combines list of command tokens or raw command string safely."""
+    if isinstance(cmd_arg, list):
+        if cmd_arg and cmd_arg[0] == "--":
+            cmd_arg = cmd_arg[1:]
+        return " ".join(cmd_arg).strip()
+    return (cmd_arg or "").strip()
 
 
 def main(argv: Optional[List[str]] = None):
@@ -311,11 +382,23 @@ def main(argv: Optional[List[str]] = None):
     elif args.cmd == "grep":
         code = execute_action(host, cwd, "grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
     elif args.cmd == "run":
-        code = execute_action(host, cwd, "run", {"cmd": args.command, "cwd": cwd, "tail": args.tail, "timeout": args.timeout, "venv": venv})
+        cmd_str = _resolve_cmd_string(args.command)
+        if not cmd_str:
+            print("ERROR: Missing command to execute. Usage: agentbox run <command>", file=sys.stderr)
+            return 1
+        code = execute_action(host, cwd, "run", {"cmd": cmd_str, "cwd": cwd, "tail": args.tail, "timeout": args.timeout, "venv": venv})
     elif args.cmd == "test":
-        code = execute_action(host, cwd, "test", {"cmd": args.command, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
+        cmd_str = _resolve_cmd_string(args.command)
+        if not cmd_str:
+            print("ERROR: Missing test command to run. Usage: agentbox test <test_cmd>", file=sys.stderr)
+            return 1
+        code = execute_action(host, cwd, "test", {"cmd": cmd_str, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
     elif args.cmd == "spawn":
-        code = execute_action(host, cwd, "spawn", {"cmd": args.command, "cwd": cwd, "venv": venv})
+        cmd_str = _resolve_cmd_string(args.command)
+        if not cmd_str:
+            print("ERROR: Missing command to spawn. Usage: agentbox spawn <command>", file=sys.stderr)
+            return 1
+        code = execute_action(host, cwd, "spawn", {"cmd": cmd_str, "cwd": cwd, "venv": venv})
     elif args.cmd == "status":
         code = execute_action(host, cwd, "status", {"task_id": args.task_id})
     elif args.cmd == "logs":
