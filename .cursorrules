@@ -45,6 +45,9 @@
 * `agentbox task rm <name>` — removes a task from `.agentbox.json`.
 
 <!-- AGENTBOX_TASKS_START -->
+##### 📋 Verified Project Recipes (Auto-Memoized):
+* `agentbox task test` — `python -m unittest discover -s tests`
+* `agentbox task test:verbose` — `python -m unittest discover -s tests -v`
 <!-- AGENTBOX_TASKS_END -->
 
 ### 🔄 Самообучение и рецепты (Task Auto-Memoization):

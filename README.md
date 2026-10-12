@@ -192,12 +192,12 @@ agentbox kill bg_849201
 
 ### 3. File Operations & Safe Atomic Patching
 
-#### `agentbox write <file> [--content "..."] [--append]`
-Safely creates or appends to a file without any bash quote escaping issues (supports stdin streaming):
+#### `agentbox write <file> [--content "..."] [--stdin] [--append]`
+Safely creates or appends to a file without any bash quote escaping issues (supports stdin streaming via `--stdin`):
 ```bash
 agentbox write src/settings.py --content 'DEBUG = True\nPORT = 8080'
 # Or via pipeline:
-cat config.json | agentbox write config.json
+cat config.json | agentbox write config.json --stdin
 ```
 
 #### `agentbox patch <file> --old "<exact_code>" --new "<replacement>"`
@@ -309,7 +309,7 @@ agentbox git-fn-history src/auth.py verify_jwt -n 3
 
 ### 6. Project Tasks & Recipes (`.agentbox.json`)
 
-Save recurring project commands and parameters (database connections, custom migrations, restart scripts) in `.agentbox.json` and execute them with a short recipe command:
+Save recurring project commands and parameters (database connections, custom migrations, restart scripts) in `.agentbox.json` (automatically discovered in current directory or parent directories up to the Git root) and execute them with a short recipe command:
 
 ```json
 {

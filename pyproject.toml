@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-agentbox"
-version = "0.1.6"
+version = "0.1.7"
 description = "Token-efficient remote execution, AST outlining, and safe patching tool for AI agents."
 readme = "README.md"
 requires-python = ">=3.8"

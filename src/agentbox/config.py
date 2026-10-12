@@ -14,6 +14,26 @@ GLOBAL_CONFIG_DIR = Path.home() / ".agentbox"
 GLOBAL_CONFIG_FILE = GLOBAL_CONFIG_DIR / "config.json"
 LOCAL_CONFIG_FILE = Path(".agentbox.json")
 
+
+def find_local_config(start: Optional[Path] = None) -> Optional[Path]:
+    """Recursively searches for .agentbox.json upwards from start directory to git root or filesystem root."""
+    cur = (start or Path.cwd()).resolve()
+    for parent in [cur] + list(cur.parents):
+        candidate = parent / ".agentbox.json"
+        if candidate.is_file():
+            return candidate
+        if (parent / ".git").exists():
+            break
+    return None
+
+
+def get_local_config_file(for_writing: bool = False) -> Path:
+    """Returns path to .agentbox.json: either found in parent tree or default in current dir."""
+    found = find_local_config()
+    if found:
+        return found
+    return LOCAL_CONFIG_FILE
+
 DEFAULT_CONFIG: Dict[str, Any] = {
     "host": "",
     "cwd": "",
@@ -34,9 +54,10 @@ def get_config() -> Dict[str, Any]:
         except Exception:
             pass
 
-    if LOCAL_CONFIG_FILE.is_file():
+    local_path = get_local_config_file()
+    if local_path.is_file():
         try:
-            cfg.update(json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8")))
+            cfg.update(json.loads(local_path.read_text(encoding="utf-8")))
         except Exception:
             pass
 
@@ -59,13 +80,14 @@ def save_global_config(updates: Dict[str, Any]) -> None:
 def save_local_config(updates: Dict[str, Any]) -> None:
     """Updates and saves local project-level configuration."""
     cfg = {}
-    if LOCAL_CONFIG_FILE.is_file():
+    local_path = get_local_config_file(for_writing=True)
+    if local_path.is_file():
         try:
-            cfg = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8"))
+            cfg = json.loads(local_path.read_text(encoding="utf-8"))
         except Exception:
             pass
     cfg.update(updates)
-    LOCAL_CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    local_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
 def get_tasks() -> Dict[str, str]:
@@ -79,9 +101,10 @@ def get_tasks() -> Dict[str, str]:
         except Exception:
             pass
 
-    if LOCAL_CONFIG_FILE.is_file():
+    local_path = get_local_config_file()
+    if local_path.is_file():
         try:
-            l_data = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8"))
+            l_data = json.loads(local_path.read_text(encoding="utf-8"))
             if isinstance(l_data.get("tasks"), dict):
                 tasks.update(l_data["tasks"])
         except Exception:
@@ -93,9 +116,10 @@ def get_tasks() -> Dict[str, str]:
 def add_task(name: str, command: str) -> None:
     """Saves or updates a task in the local project .agentbox.json."""
     cfg = {}
-    if LOCAL_CONFIG_FILE.is_file():
+    local_path = get_local_config_file(for_writing=True)
+    if local_path.is_file():
         try:
-            cfg = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8"))
+            cfg = json.loads(local_path.read_text(encoding="utf-8"))
         except Exception:
             pass
 
@@ -104,17 +128,18 @@ def add_task(name: str, command: str) -> None:
         tasks = {}
     tasks[name] = command
     cfg["tasks"] = tasks
-    LOCAL_CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    local_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     sync_rules_with_tasks()
 
 
 def remove_task(name: str) -> bool:
     """Removes a task from local project .agentbox.json. Returns True if removed, False if not found."""
-    if not LOCAL_CONFIG_FILE.is_file():
+    local_path = get_local_config_file()
+    if not local_path.is_file():
         return False
 
     try:
-        cfg = json.loads(LOCAL_CONFIG_FILE.read_text(encoding="utf-8"))
+        cfg = json.loads(local_path.read_text(encoding="utf-8"))
     except Exception:
         return False
 
@@ -124,7 +149,7 @@ def remove_task(name: str) -> bool:
 
     del tasks[name]
     cfg["tasks"] = tasks
-    LOCAL_CONFIG_FILE.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    local_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     sync_rules_with_tasks()
     return True
 
@@ -185,7 +210,7 @@ RULE_TEMPLATE = """# 🛡️ MANDATORY PROTOCOL: Remote & Local Execution (Agent
 """
 
 
-def format_tasks_markdown(tasks: Optional[Dict[str, str]] = None) -> str:
+def format_tasks_markdown(tasks: Optional[Dict[str, str]] = None, newline: str = "\n") -> str:
     """Formats tasks into a compact Markdown bullet list for rule injection."""
     if tasks is None:
         tasks = get_tasks()
@@ -196,16 +221,15 @@ def format_tasks_markdown(tasks: Optional[Dict[str, str]] = None) -> str:
         for name, cmd in sorted(tasks.items()):
             lines.append(f"* `agentbox task {name}` — `{cmd}`")
     lines.append("<!-- AGENTBOX_TASKS_END -->")
-    return "\n".join(lines)
+    return newline.join(lines)
 
 
 def sync_rules_with_tasks(target_dir: Optional[Path] = None) -> List[str]:
-    """Deterministically injects active tasks into existing rule files."""
+    """Deterministically injects active tasks into existing rule files preserving original line endings."""
     root = target_dir or Path.cwd()
     rule_filenames = [".cursorrules", "AGENTS.md", "AGENT.md", "CLAUDE.md"]
     updated_files = []
     tasks = get_tasks()
-    tasks_block = format_tasks_markdown(tasks)
 
     start_marker = "<!-- AGENTBOX_TASKS_START -->"
     end_marker = "<!-- AGENTBOX_TASKS_END -->"
@@ -216,9 +240,13 @@ def sync_rules_with_tasks(target_dir: Optional[Path] = None) -> List[str]:
             continue
 
         try:
-            content = p.read_text(encoding="utf-8")
+            raw_bytes = p.read_bytes()
+            newline = "\r\n" if b"\r\n" in raw_bytes else "\n"
+            content = raw_bytes.decode("utf-8")
         except Exception:
             continue
+
+        tasks_block = format_tasks_markdown(tasks, newline=newline)
 
         if start_marker in content and end_marker in content:
             # Replace existing block between markers
@@ -228,12 +256,12 @@ def sync_rules_with_tasks(target_dir: Optional[Path] = None) -> List[str]:
             # Inject block right after Project Tasks & Recipes header if present
             anchor = "#### 6. Project Tasks & Recipes (.agentbox.json)"
             if anchor in content:
-                new_content = content.replace(anchor, f"{anchor}\n\n{tasks_block}")
+                new_content = content.replace(anchor, f"{anchor}{newline}{newline}{tasks_block}")
             else:
-                new_content = content + f"\n\n{tasks_block}\n"
+                new_content = content + f"{newline}{newline}{tasks_block}{newline}"
 
         if new_content != content:
-            p.write_text(new_content, encoding="utf-8")
+            p.write_bytes(new_content.encode("utf-8"))
             updated_files.append(fname)
 
     return updated_files

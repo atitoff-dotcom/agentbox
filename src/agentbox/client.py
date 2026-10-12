@@ -16,6 +16,26 @@ from . import worker
 
 WORKER_LOCAL_FILE = Path(__file__).parent / "worker.py"
 REMOTE_WORKER_PATH = "~/.agentbox_worker.py"
+WORKER_CACHE_FILE = Path.home() / ".agentbox" / ".worker_cache.json"
+
+
+def load_worker_cache() -> Dict[str, str]:
+    """Loads cached remote worker SHA-256 hashes per host."""
+    if WORKER_CACHE_FILE.is_file():
+        try:
+            return json.loads(WORKER_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def save_worker_cache(cache: Dict[str, str]) -> None:
+    """Saves cached remote worker SHA-256 hashes."""
+    try:
+        WORKER_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WORKER_CACHE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def get_local_worker_bytes() -> bytes:
@@ -26,10 +46,15 @@ def get_local_worker_bytes() -> bytes:
     return inspect.getsource(worker).encode("utf-8")
 
 
-def ensure_remote_worker(host: str) -> None:
-    """Verifies that the remote worker matches local worker SHA-256; uploads if needed."""
+def ensure_remote_worker(host: str, force: bool = False) -> None:
+    """Verifies that the remote worker matches local worker SHA-256; uploads if needed.
+    Caches verified hash to eliminate redundant SSH round-trips."""
     local_bytes = get_local_worker_bytes()
     local_hash = hashlib.sha256(local_bytes).hexdigest()
+
+    cache = load_worker_cache()
+    if not force and cache.get(host) == local_hash:
+        return
 
     # Check remote hash
     check_cmd = ["ssh", host, f"sha256sum {REMOTE_WORKER_PATH} 2>/dev/null || echo NONE"]
@@ -43,6 +68,9 @@ def ensure_remote_worker(host: str) -> None:
         if up_proc.returncode != 0:
             print(f"ERROR: Failed to bootstrap worker to {host}", file=sys.stderr)
             sys.exit(up_proc.returncode)
+
+    cache[host] = local_hash
+    save_worker_cache(cache)
 
 
 def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any]) -> int:
@@ -68,6 +96,10 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any]) -> in
     cmd = ["ssh", host, f"python3 {REMOTE_WORKER_PATH} --ipc"]
     try:
         proc = subprocess.run(cmd, input=payload, text=True)
+        # If remote worker was missing or killed (e.g. exit 127), force re-upload and retry once
+        if proc.returncode == 127:
+            ensure_remote_worker(host, force=True)
+            proc = subprocess.run(cmd, input=payload, text=True)
         return proc.returncode
     except KeyboardInterrupt:
         return 0

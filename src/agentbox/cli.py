@@ -9,6 +9,13 @@ import sys
 import argparse
 from typing import List, Optional
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from . import __version__
 from .config import get_config, save_global_config, save_local_config, generate_rules, get_tasks, add_task, remove_task
 from .client import execute_action
@@ -61,7 +68,8 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # write
     p_write = sub.add_parser("write", help="Safely write or append content to file without bash quoting issues")
     p_write.add_argument("path", help="Path to target file")
-    p_write.add_argument("--content", default=None, help="File content (reads from stdin if omitted)")
+    p_write.add_argument("--content", default=None, help="File content (reads from stdin if --stdin is specified)")
+    p_write.add_argument("--stdin", action="store_true", help="Read content from stdin")
     p_write.add_argument("--append", action="store_true", help="Append instead of overwrite")
 
     # patch
@@ -287,8 +295,12 @@ def main(argv: Optional[List[str]] = None):
         code = execute_action(host, cwd, "get_fn", {"path": args.path, "name": args.name})
     elif args.cmd == "write":
         content = args.content
-        if content is None and not sys.stdin.isatty():
-            content = sys.stdin.read()
+        if content is None:
+            if getattr(args, "stdin", False):
+                content = sys.stdin.read()
+            else:
+                print("ERROR: Provide content via --content \"...\" or pass --stdin to read from standard input.", file=sys.stderr)
+                return 1
         code = execute_action(host, cwd, "write", {"path": args.path, "content": content, "append": args.append})
     elif args.cmd == "patch":
         code = execute_action(host, cwd, "patch", {"path": args.path, "old": args.old, "new": args.new, "all": args.all})
@@ -329,8 +341,8 @@ def main(argv: Optional[List[str]] = None):
     else:
         code = 1
 
-    sys.exit(code)
+    return code
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
