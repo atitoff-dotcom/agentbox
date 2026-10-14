@@ -156,6 +156,27 @@ class TestImprovements(unittest.TestCase):
             self.assertEqual(ret, 1)
             self.assertIn("ERROR: Missing command to execute", err.getvalue())
 
+    def test_win_no_window_kwargs(self):
+        import sys
+        import subprocess
+        from agentbox.worker import win_no_window_kwargs as worker_win_kw
+        from agentbox.client import win_no_window_kwargs as client_win_kw
+
+        expected_flag = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        with patch("sys.platform", "win32"):
+            kw_w = worker_win_kw()
+            kw_c = client_win_kw()
+            self.assertEqual(kw_w, {"creationflags": expected_flag})
+            self.assertEqual(kw_c, {"creationflags": expected_flag})
+
+            # Check combining extra flags
+            combined = worker_win_kw(subprocess.CREATE_NEW_PROCESS_GROUP)
+            self.assertEqual(combined, {"creationflags": expected_flag | subprocess.CREATE_NEW_PROCESS_GROUP})
+
+        with patch("sys.platform", "linux"):
+            self.assertEqual(worker_win_kw(), {})
+            self.assertEqual(client_win_kw(), {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,6 +32,16 @@ GIT_IGNORE_DIFF_PATTERNS = [
 ]
 
 
+def win_no_window_kwargs(extra_flags: int = 0) -> dict:
+    """Returns creationflags on Windows to suppress terminal/console window popups."""
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        if extra_flags:
+            flags |= extra_flags
+        return {"creationflags": flags}
+    return {}
+
+
 def to_path(p: str = None) -> Path:
     if not p:
         return Path.cwd()
@@ -488,7 +498,8 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
-                errors="replace"
+                errors="replace",
+                **win_no_window_kwargs()
             )
             count = 0
             if proc.stdout:
@@ -536,7 +547,7 @@ def cmd_git_status(path: str = ".") -> None:
         sys.exit(1)
 
     # 1. Get porcelain status
-    res = subprocess.run(["git", "status", "--porcelain=v1", "-uall"], cwd=str(git_root), capture_output=True, text=True)
+    res = subprocess.run(["git", "status", "--porcelain=v1", "-uall"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if res.returncode != 0:
         print(f"ERROR: git status failed: {res.stderr.strip()}", file=sys.stderr)
         sys.exit(res.returncode)
@@ -548,9 +559,9 @@ def cmd_git_status(path: str = ".") -> None:
 
     # 2. Get numstat for diff counts (+N, -M)
     numstat_map = {}
-    diff_res = subprocess.run(["git", "diff", "--numstat", "HEAD"], cwd=str(git_root), capture_output=True, text=True)
+    diff_res = subprocess.run(["git", "diff", "--numstat", "HEAD"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if diff_res.returncode != 0:
-        diff_res = subprocess.run(["git", "diff", "--numstat"], cwd=str(git_root), capture_output=True, text=True)
+        diff_res = subprocess.run(["git", "diff", "--numstat"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if diff_res.returncode == 0:
         for line in diff_res.stdout.splitlines():
             parts = line.split("\t")
@@ -598,7 +609,7 @@ def cmd_diff(path: str = "", rev: str = None, cached: bool = False, max_lines: i
         for pattern in GIT_IGNORE_DIFF_PATTERNS:
             cmd.append(f":(exclude){pattern}")
 
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: git diff failed: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -633,7 +644,7 @@ def cmd_git_log(path: str = "", limit: int = 5) -> None:
         except ValueError:
             pass
 
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: git log failed: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -662,7 +673,7 @@ def cmd_git_view(path: str, rev: str = "HEAD", start: int = 1, end: int = 100) -
         rel_path = str(p).replace("\\", "/")
 
     target = f"{rev}:{rel_path}"
-    proc = subprocess.run(["git", "show", target], cwd=str(git_root), capture_output=True, text=True, errors="replace")
+    proc = subprocess.run(["git", "show", target], cwd=str(git_root), capture_output=True, text=True, errors="replace", **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: Failed to retrieve {target}: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -692,7 +703,7 @@ def cmd_git_fn_history(path: str, name: str, limit: int = 3) -> None:
 
     # 1. Try git log -L :<funcname>:<file> (AST function tracing in git)
     cmd = ["git", "log", f"-n{limit}", "-w", f"-L:{name}:{rel_path}"]
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True)
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if proc.returncode == 0 and proc.stdout.strip():
         lines = proc.stdout.splitlines()
         capped = lines[:80]
@@ -704,7 +715,7 @@ def cmd_git_fn_history(path: str, name: str, limit: int = 3) -> None:
 
     # 2. Fallback to git log -S <name> -p
     fb_cmd = ["git", "log", f"-n{limit}", "-w", "-S", name, "-p", "-U2", "--", rel_path]
-    fb_proc = subprocess.run(fb_cmd, cwd=str(git_root), capture_output=True, text=True)
+    fb_proc = subprocess.run(fb_cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
     if fb_proc.returncode == 0 and fb_proc.stdout.strip():
         lines = fb_proc.stdout.splitlines()
         capped = lines[:80]
@@ -765,6 +776,7 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **win_no_window_kwargs()
             )
             proc.wait(timeout=timeout)
             ret_code = proc.returncode
@@ -968,6 +980,7 @@ def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **win_no_window_kwargs()
             )
             proc.wait(timeout=timeout)
             ret_code = proc.returncode
@@ -1024,7 +1037,11 @@ def cmd_spawn(cmd: str, cwd: str = None, venv: str = None) -> None:
     out.write(f"=== Spawned: {cmd}{venv_note}\n=== CWD: {work_dir}\n=== Started: {time.ctime(start_time)}\n\n")
     out.flush()
 
-    kwargs = {"start_new_session": True} if os.name != "nt" else {}
+    if os.name != "nt":
+        kwargs = {"start_new_session": True}
+    else:
+        extra_flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs = win_no_window_kwargs(extra_flags)
 
     proc = subprocess.Popen(
         cmd,
@@ -1066,7 +1083,7 @@ def cmd_status(task_id: str) -> None:
             os.kill(pid, 0)
             alive = True
         else:
-            proc = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True)
+            proc = subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True, **win_no_window_kwargs())
             alive = str(pid) in proc.stdout
     except OSError:
         alive = False
@@ -1104,7 +1121,7 @@ def cmd_kill(task_id: str) -> None:
             except OSError:
                 pass
         else:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)])
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], **win_no_window_kwargs())
         print(f"OK: Task {task_id} (PID {pid}) terminated.")
     except Exception as e:
         print(f"ERROR: Failed to kill PID {pid}: {e}", file=sys.stderr)
@@ -1169,7 +1186,7 @@ def _find_graphify_python(work_dir: Path = None, explicit_venv: str = None) -> s
                 cand = bin_dir / py_name
                 if cand.is_file():
                     try:
-                        chk = subprocess.run([str(cand), "-c", "import graphify; print('OK')"], capture_output=True, text=True)
+                        chk = subprocess.run([str(cand), "-c", "import graphify; print('OK')"], capture_output=True, text=True, **win_no_window_kwargs())
                         if chk.returncode == 0:
                             return str(cand)
                     except Exception:
@@ -1186,7 +1203,7 @@ def _find_graphify_python(work_dir: Path = None, explicit_venv: str = None) -> s
 
     # Check current python
     try:
-        proc = subprocess.run([sys.executable, "-c", "import graphify; print(sys.executable)"], capture_output=True, text=True)
+        proc = subprocess.run([sys.executable, "-c", "import graphify; print(sys.executable)"], capture_output=True, text=True, **win_no_window_kwargs())
         if proc.returncode == 0:
             return proc.stdout.strip()
     except Exception:
@@ -1197,7 +1214,7 @@ def _find_graphify_python(work_dir: Path = None, explicit_venv: str = None) -> s
         path = shutil.which(cmd)
         if path:
             try:
-                chk = subprocess.run([path, "-c", "import graphify; print('OK')"] if "python" in cmd else [path, "run", "python", "-c", "import graphify; print('OK')"], capture_output=True, text=True)
+                chk = subprocess.run([path, "-c", "import graphify; print('OK')"] if "python" in cmd else [path, "run", "python", "-c", "import graphify; print('OK')"], capture_output=True, text=True, **win_no_window_kwargs())
                 if chk.returncode == 0:
                     return path
             except Exception:
@@ -1222,7 +1239,7 @@ def cmd_graphify_install(upgrade: bool = False) -> None:
     else:
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade" if upgrade else "--quiet", "graphifyy"]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = subprocess.run(cmd, capture_output=True, text=True, **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"FAILED: Failed to install graphifyy (exit {proc.returncode})\n{proc.stderr.strip()[:400]}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -1248,7 +1265,7 @@ def cmd_graphify_build(path: str = ".", deep: bool = False, venv: str = None) ->
     with open(log_file, "w", encoding="utf-8") as out:
         out.write(f"=== Graphify Build: {' '.join(build_cmd)}\n=== Started: {time.ctime(start_time)}\n\n")
         out.flush()
-        proc = subprocess.run(build_cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(p))
+        proc = subprocess.run(build_cmd, stdout=out, stderr=subprocess.STDOUT, cwd=str(p), **win_no_window_kwargs())
 
     dur = time.time() - start_time
     if proc.returncode != 0:
@@ -1284,7 +1301,7 @@ def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, v
 
     py = _find_graphify_python(p, venv) or sys.executable
     # Try native graphify query CLI
-    proc = subprocess.run([py, "-m", "graphify", "query", question], capture_output=True, text=True, cwd=str(p))
+    proc = subprocess.run([py, "-m", "graphify", "query", question], capture_output=True, text=True, cwd=str(p), **win_no_window_kwargs())
     if proc.returncode == 0 and proc.stdout.strip():
         # Trim output to token budget
         output_lines = proc.stdout.strip().splitlines()[:50]

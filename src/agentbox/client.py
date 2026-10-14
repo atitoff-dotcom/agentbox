@@ -52,6 +52,16 @@ def get_local_worker_bytes() -> bytes:
     return inspect.getsource(worker).encode("utf-8")
 
 
+def win_no_window_kwargs(extra_flags: int = 0) -> dict:
+    """Returns creationflags on Windows to suppress terminal/console window popups."""
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        if extra_flags:
+            flags |= extra_flags
+        return {"creationflags": flags}
+    return {}
+
+
 def ensure_remote_worker(host: str, force: bool = False) -> None:
     """Verifies that the remote worker matches local worker SHA-256; uploads if needed.
     Caches verified hash to eliminate redundant SSH round-trips."""
@@ -64,13 +74,13 @@ def ensure_remote_worker(host: str, force: bool = False) -> None:
 
     # Check remote hash
     check_cmd = ["ssh", host, f"sha256sum {REMOTE_WORKER_PATH} 2>/dev/null || echo NONE"]
-    proc = subprocess.run(check_cmd, capture_output=True, text=True)
+    proc = subprocess.run(check_cmd, capture_output=True, text=True, **win_no_window_kwargs())
     remote_out = proc.stdout.strip()
     remote_hash = remote_out.split()[0] if remote_out else "NONE"
 
     if remote_hash != local_hash:
         upload_cmd = ["ssh", host, f"cat > {REMOTE_WORKER_PATH} && chmod +x {REMOTE_WORKER_PATH}"]
-        up_proc = subprocess.run(upload_cmd, input=local_bytes)
+        up_proc = subprocess.run(upload_cmd, input=local_bytes, **win_no_window_kwargs())
         if up_proc.returncode != 0:
             print(f"ERROR: Failed to bootstrap worker to {host}", file=sys.stderr)
             sys.exit(up_proc.returncode)
@@ -111,7 +121,7 @@ def spawn_bridge_daemon(host: str) -> None:
     BRIDGE_RUN_DIR.mkdir(parents=True, exist_ok=True)
     flags = 0
     if sys.platform == "win32":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
 
     cmd = [sys.executable, "-m", "agentbox.client", "--bridge-server", host]
     try:
@@ -216,7 +226,8 @@ def run_bridge_server(host: str, idle_timeout: int = 1800) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            bufsize=1
+            bufsize=1,
+            **win_no_window_kwargs()
         )
     except Exception:
         server_sock.close()
@@ -482,10 +493,10 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
     payload = json.dumps({"action": action, "args": args})
     cmd = ["ssh", host, f"python3 {REMOTE_WORKER_PATH} --ipc"]
     try:
-        proc = subprocess.run(cmd, input=payload, text=True)
+        proc = subprocess.run(cmd, input=payload, text=True, **win_no_window_kwargs())
         if proc.returncode == 127:
             ensure_remote_worker(host, force=True)
-            proc = subprocess.run(cmd, input=payload, text=True)
+            proc = subprocess.run(cmd, input=payload, text=True, **win_no_window_kwargs())
         return proc.returncode
     except KeyboardInterrupt:
         return 0
