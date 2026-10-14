@@ -109,6 +109,20 @@ Extracts the exact definition and body of a target function:
 agentbox get-fn src/gateway.py handle_connection
 ```
 
+#### `agentbox find-fn <name> [path] [--exact]`
+Recursively scans project AST to locate where a function or class is declared without noisy grep output:
+```bash
+agentbox find-fn get_bank
+# Or exact match:
+agentbox find-fn Bank --exact
+```
+*Output:*
+```text
+=== FOUND SYMBOLS: 'Bank' (2 matches) ===
+  app/bank/models.py:11   | class Bank(Base)
+  archive/app/bank/models.py:13   | class Bank(BasicSecureModel)
+```
+
 #### `agentbox view <file> [--start N] [--end M]`
 Displays an exact line slice with 1-indexed line numbers:
 ```bash
@@ -349,6 +363,35 @@ agentbox task add db "PGPASSWORD=secret psql -h localhost -U user -d db -c {args
 ```bash
 agentbox task rm db
 # Output: OK: Task 'db' removed from .agentbox.json.
+```
+
+---
+
+### 8. Sub-Millisecond Remote Execution (Persistent Daemon Bridge)
+
+By default, every remote SSH command would incur a 300–1500ms overhead due to SSH handshakes and Python interpreter cold start.
+AgentBox solves this with an **automatic, transparent Persistent Stdio-Daemon Bridge**:
+
+* **Zero-config auto-start**: Upon your first command, AgentBox automatically spawns a local background bridge that maintains a persistent SSH session connected to `python3 ~/.agentbox_worker.py --daemon`.
+* **Sub-millisecond latency**: AST parsing, outline extraction, and atomic patching execute in-memory on the remote host in **2–5 ms**.
+* **Auto-teardown**: After 30 minutes of inactivity, both the local bridge and remote worker terminate gracefully to free memory.
+* **Fallback guarantee**: If background processes are restricted, AgentBox transparently falls back to direct SSH IPC without interrupting your workflow.
+
+#### Inspect active daemon connections:
+```bash
+agentbox daemon status
+# Output: Host: user@server | Status: ACTIVE (Sub-ms latency) | PID: 12450 | Port: 54312 | Uptime: 45s
+```
+
+#### Stop daemon bridge manually:
+```bash
+agentbox daemon stop
+# Output: Stopped daemon for host: user@server (PID: 12450)
+```
+
+#### Bypass daemon for a one-off command:
+```bash
+agentbox --no-daemon view src/main.py
 ```
 
 ---

@@ -18,7 +18,7 @@ if sys.platform == "win32":
 
 from . import __version__
 from .config import get_config, save_global_config, save_local_config, generate_rules, get_tasks, add_task, remove_task
-from .client import execute_action
+from .client import execute_action, status_daemon, stop_daemon
 
 
 class AgentBoxParser(argparse.ArgumentParser):
@@ -92,6 +92,7 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     parser.add_argument("--host", default=default_cfg.get("host", ""), help="Target SSH host (e.g. user@server, or empty for local)")
     parser.add_argument("--cwd", default=default_cfg.get("cwd", ""), help="Target working directory")
     parser.add_argument("--venv", default=None, help="Target virtualenv path (auto-detected if omitted)")
+    parser.add_argument("--no-daemon", action="store_true", help="Bypass persistent daemon bridge and run direct SSH")
 
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -235,6 +236,18 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_gfh.add_argument("name", help="Name of function or class")
     p_gfh.add_argument("-n", "--limit", type=int, default=3, help="Max revisions to inspect (default: 3)")
 
+    # find-fn
+    p_ff = sub.add_parser("find-fn", help="Locate functions or classes across project via fast AST analysis")
+    p_ff.add_argument("name", help="Name or substring of function/class to locate")
+    p_ff.add_argument("path", nargs="?", default="", help="Directory to search (default: current working directory)")
+    p_ff.add_argument("--exact", action="store_true", help="Exact name match only (case-sensitive)")
+    p_ff.add_argument("--max", dest="max_results", type=int, default=30, help="Max results (default: 30)")
+
+    # daemon
+    p_daemon = sub.add_parser("daemon", help="Manage persistent background daemon connections")
+    p_daemon.add_argument("daemon_action", choices=["status", "stop"], nargs="?", default="status", help="Action: status or stop (default: status)")
+    p_daemon.add_argument("daemon_host", nargs="?", default=None, help="Target remote host (optional)")
+
     return parser
 
 
@@ -345,25 +358,39 @@ def main(argv: Optional[List[str]] = None):
         host = args.host
         cwd = args.cwd
         venv = getattr(args, "cmd_venv", None) or getattr(args, "venv", None) or cfg.get("venv", "")
+        act_kwargs = {"use_daemon": False} if getattr(args, "no_daemon", False) else {}
         code = execute_action(host, cwd, "run", {
             "cmd": resolved_cmd,
             "cwd": cwd,
             "tail": cfg.get("tail", 15),
             "timeout": cfg.get("timeout", None),
             "venv": venv
-        })
+        }, **act_kwargs)
         return code
+
+    if args.cmd == "daemon":
+        if args.daemon_action == "stop":
+            return stop_daemon(args.daemon_host or args.host)
+        else:
+            return status_daemon(args.daemon_host)
 
     host = args.host
     cwd = args.cwd
     venv = getattr(args, "cmd_venv", None) or getattr(args, "venv", None) or cfg.get("venv", "")
 
+    def run_action(action: str, act_args: dict) -> int:
+        if getattr(args, "no_daemon", False):
+            return execute_action(host, cwd, action, act_args, use_daemon=False)
+        return execute_action(host, cwd, action, act_args)
+
     if args.cmd == "view":
-        code = execute_action(host, cwd, "view", {"path": args.path, "start": args.start, "end": args.end})
+        code = run_action("view", {"path": args.path, "start": args.start, "end": args.end})
     elif args.cmd == "outline":
-        code = execute_action(host, cwd, "outline", {"path": args.path})
+        code = run_action("outline", {"path": args.path})
     elif args.cmd == "get-fn":
-        code = execute_action(host, cwd, "get_fn", {"path": args.path, "name": args.name})
+        code = run_action("get_fn", {"path": args.path, "name": args.name})
+    elif args.cmd == "find-fn":
+        code = run_action("find_fn", {"name": args.name, "path": args.path or cwd, "exact": args.exact, "max": args.max_results})
     elif args.cmd == "write":
         content = args.content
         if content is None:
@@ -372,55 +399,55 @@ def main(argv: Optional[List[str]] = None):
             else:
                 print("ERROR: Provide content via --content \"...\" or pass --stdin to read from standard input.", file=sys.stderr)
                 return 1
-        code = execute_action(host, cwd, "write", {"path": args.path, "content": content, "append": args.append})
+        code = run_action("write", {"path": args.path, "content": content, "append": args.append})
     elif args.cmd == "patch":
-        code = execute_action(host, cwd, "patch", {"path": args.path, "old": args.old, "new": args.new, "all": args.all})
+        code = run_action("patch", {"path": args.path, "old": args.old, "new": args.new, "all": args.all})
     elif args.cmd == "rollback":
-        code = execute_action(host, cwd, "rollback", {"path": args.path})
+        code = run_action("rollback", {"path": args.path})
     elif args.cmd == "tree":
-        code = execute_action(host, cwd, "tree", {"path": args.path or cwd, "depth": args.depth})
+        code = run_action("tree", {"path": args.path or cwd, "depth": args.depth})
     elif args.cmd == "grep":
-        code = execute_action(host, cwd, "grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
+        code = run_action("grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
     elif args.cmd == "run":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:
             print("ERROR: Missing command to execute. Usage: agentbox run <command>", file=sys.stderr)
             return 1
-        code = execute_action(host, cwd, "run", {"cmd": cmd_str, "cwd": cwd, "tail": args.tail, "timeout": args.timeout, "venv": venv})
+        code = run_action("run", {"cmd": cmd_str, "cwd": cwd, "tail": args.tail, "timeout": args.timeout, "venv": venv})
     elif args.cmd == "test":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:
             print("ERROR: Missing test command to run. Usage: agentbox test <test_cmd>", file=sys.stderr)
             return 1
-        code = execute_action(host, cwd, "test", {"cmd": cmd_str, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
+        code = run_action("test", {"cmd": cmd_str, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
     elif args.cmd == "spawn":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:
             print("ERROR: Missing command to spawn. Usage: agentbox spawn <command>", file=sys.stderr)
             return 1
-        code = execute_action(host, cwd, "spawn", {"cmd": cmd_str, "cwd": cwd, "venv": venv})
+        code = run_action("spawn", {"cmd": cmd_str, "cwd": cwd, "venv": venv})
     elif args.cmd == "status":
-        code = execute_action(host, cwd, "status", {"task_id": args.task_id})
+        code = run_action("status", {"task_id": args.task_id})
     elif args.cmd == "logs":
-        code = execute_action(host, cwd, "logs", {"task_id": args.task_id, "lines": args.lines, "follow": args.follow})
+        code = run_action("logs", {"task_id": args.task_id, "lines": args.lines, "follow": args.follow})
     elif args.cmd == "kill":
-        code = execute_action(host, cwd, "kill", {"task_id": args.task_id})
+        code = run_action("kill", {"task_id": args.task_id})
     elif args.cmd == "graphify-install":
-        code = execute_action(host, cwd, "graphify_install", {"upgrade": args.upgrade})
+        code = run_action("graphify_install", {"upgrade": args.upgrade})
     elif args.cmd == "graphify-build":
-        code = execute_action(host, cwd, "graphify_build", {"path": args.path or cwd, "deep": args.deep, "venv": venv})
+        code = run_action("graphify_build", {"path": args.path or cwd, "deep": args.deep, "venv": venv})
     elif args.cmd == "graphify-query":
-        code = execute_action(host, cwd, "graphify_query", {"question": args.question, "path": args.path or cwd, "max_tokens": args.max_tokens, "venv": venv})
+        code = run_action("graphify_query", {"question": args.question, "path": args.path or cwd, "max_tokens": args.max_tokens, "venv": venv})
     elif args.cmd == "git-status":
-        code = execute_action(host, cwd, "git_status", {"path": args.path or cwd})
+        code = run_action("git_status", {"path": args.path or cwd})
     elif args.cmd == "diff":
-        code = execute_action(host, cwd, "diff", {"path": args.path or cwd, "rev": args.rev, "cached": args.cached, "max_lines": args.max_lines})
+        code = run_action("diff", {"path": args.path or cwd, "rev": args.rev, "cached": args.cached, "max_lines": args.max_lines})
     elif args.cmd == "git-log":
-        code = execute_action(host, cwd, "git_log", {"path": args.path or cwd, "limit": args.limit})
+        code = run_action("git_log", {"path": args.path or cwd, "limit": args.limit})
     elif args.cmd == "git-view":
-        code = execute_action(host, cwd, "git_view", {"path": args.path, "rev": args.rev, "start": args.start, "end": args.end})
+        code = run_action("git_view", {"path": args.path, "rev": args.rev, "start": args.start, "end": args.end})
     elif args.cmd == "git-fn-history":
-        code = execute_action(host, cwd, "git_fn_history", {"path": args.path, "name": args.name, "limit": args.limit})
+        code = run_action("git_fn_history", {"path": args.path, "name": args.name, "limit": args.limit})
     else:
         code = 1
 

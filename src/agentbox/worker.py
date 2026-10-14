@@ -257,6 +257,88 @@ def cmd_get_fn(path: str, name: str) -> None:
     sys.exit(1)
 
 
+def cmd_find_fn(name: str, path: str = ".", exact: bool = False, max_results: int = 30) -> None:
+    """Recursively locates functions and classes across the project via AST analysis."""
+    p = to_path(path)
+    search_root = p.parent if p.is_file() else p
+
+    if not search_root.is_dir():
+        print(f"ERROR: Directory not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    code_exts = {".py", ".js", ".jsx", ".ts", ".tsx", ".rs", ".go", ".c", ".cpp", ".h", ".hpp"}
+    matches = []
+    target_lower = name.lower()
+
+    generic_rx = re.compile(
+        r"^\s*(?:pub\s+)?(?:async\s+)?(?:export\s+)?(?:default\s+)?(?:def|fn|function|class|struct|trait|func)\s+([a-zA-Z0-9_]+)"
+    )
+
+    for root, dirs, files in os.walk(search_root):
+        dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS and not d.startswith(".")]
+        for file in files:
+            fp = Path(root) / file
+            ext = fp.suffix.lower()
+            if ext not in code_exts:
+                continue
+
+            try:
+                rel = fp.relative_to(search_root)
+            except Exception:
+                rel = fp
+
+            try:
+                content = fp.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+
+            if ext == ".py":
+                try:
+                    tree = ast.parse(content, filename=str(fp))
+                    for node in ast.walk(tree):
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            n_name = node.name
+                            hit = (n_name == name) if exact else (target_lower in n_name.lower())
+                            if hit:
+                                if isinstance(node, ast.ClassDef):
+                                    bases = [ast.unparse(b) for b in node.bases]
+                                    base_str = f"({', '.join(bases)})" if bases else ""
+                                    sig = f"class {node.name}{base_str}"
+                                else:
+                                    pref = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                                    args = [a.arg for a in node.args.args]
+                                    ret = f" -> {ast.unparse(node.returns)}" if getattr(node, 'returns', None) else ""
+                                    sig = f"{pref} {node.name}({', '.join(args)}){ret}"
+                                matches.append((str(rel).replace("\\", "/"), node.lineno, sig))
+                                if len(matches) >= max_results:
+                                    break
+                except Exception:
+                    pass
+            else:
+                for line_idx, line in enumerate(content.splitlines(), start=1):
+                    m = generic_rx.search(line)
+                    if m:
+                        n_name = m.group(1)
+                        hit = (n_name == name) if exact else (target_lower in n_name.lower())
+                        if hit:
+                            matches.append((str(rel).replace("\\", "/"), line_idx, line.strip()[:90]))
+                            if len(matches) >= max_results:
+                                break
+
+            if len(matches) >= max_results:
+                break
+        if len(matches) >= max_results:
+            break
+
+    if not matches:
+        print(f"No symbols found matching '{name}' in {search_root.name or '.'}")
+        return
+
+    print(f"=== FOUND SYMBOLS: '{name}' ({len(matches)} matches) ===")
+    for rel_path, lineno, sig in matches:
+        print(f"  {rel_path}:{lineno:<4d} | {sig}")
+
+
 def cmd_patch(path: str, old_text: str, new_text: str, replace_all: bool = False) -> None:
     p = to_path(path)
     if not p.is_file():
@@ -1257,17 +1339,8 @@ def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, v
     sys.exit(1)
 
 
-def handle_ipc_mode() -> None:
-    """Reads a JSON request from stdin and executes it without bash shell escaping."""
-    try:
-        payload = json.loads(sys.stdin.read())
-    except Exception as e:
-        print(f"ERROR: Invalid JSON input: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    action = payload.get("action")
-    args = payload.get("args", {})
-
+def dispatch_action(action: str, args: Dict[str, Any]) -> None:
+    """Dispatches an action name to the corresponding worker command."""
     if action == "view":
         cmd_view(args.get("path"), args.get("start", 1), args.get("end", 100))
     elif action == "outline":
@@ -1312,12 +1385,133 @@ def handle_ipc_mode() -> None:
         cmd_git_view(args.get("path"), args.get("rev", "HEAD"), args.get("start", 1), args.get("end", 100))
     elif action == "git_fn_history":
         cmd_git_fn_history(args.get("path"), args.get("name"), args.get("limit", 3))
+    elif action == "find_fn":
+        cmd_find_fn(args.get("name"), args.get("path", "."), args.get("exact", False), args.get("max", 30))
     else:
         print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
         sys.exit(1)
 
 
+def handle_ipc_mode() -> None:
+    """Reads a single JSON request from stdin and executes it without bash shell escaping."""
+    try:
+        payload = json.loads(sys.stdin.read())
+    except Exception as e:
+        print(f"ERROR: Invalid JSON input: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    action = payload.get("action")
+    args = payload.get("args", {})
+    dispatch_action(action, args)
+
+
+class DaemonEventWriter:
+    """Redirects stdout/stderr writes into line-delimited JSON daemon protocol events."""
+    def __init__(self, req_id: str, event_type: str, raw_stream):
+        self.req_id = req_id
+        self.event_type = event_type
+        self.raw_stream = raw_stream
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        try:
+            msg = json.dumps({"id": self.req_id, "event": self.event_type, "data": s})
+            self.raw_stream.write(msg + "\n")
+            self.raw_stream.flush()
+        except Exception:
+            pass
+        return len(s)
+
+    def flush(self) -> None:
+        try:
+            self.raw_stream.flush()
+        except Exception:
+            pass
+
+    def isatty(self) -> bool:
+        return False
+
+
+def handle_daemon_mode(idle_timeout: int = 1800) -> None:
+    """Persistent stdio daemon mode for sub-millisecond execution over a persistent SSH connection.
+    Reads line-delimited JSON requests from stdin, streams stdout/stderr events,
+    and terminates on idle timeout or stdin EOF."""
+    raw_stdin = sys.stdin
+    raw_stdout = getattr(sys, "__stdout__", None) or sys.stdout
+    raw_stderr = getattr(sys, "__stderr__", None) or sys.stderr
+
+    # Send ready handshake
+    try:
+        raw_stdout.write(json.dumps({"event": "ready", "pid": os.getpid()}) + "\n")
+        raw_stdout.flush()
+    except Exception:
+        sys.exit(1)
+
+    while True:
+        # Check idle timeout on platforms supporting select on stdin (Linux/macOS)
+        if sys.platform != "win32":
+            import select
+            rlist, _, _ = select.select([raw_stdin], [], [], idle_timeout)
+            if not rlist:
+                break
+
+        line = raw_stdin.readline()
+        if not line:
+            # EOF -> Connection closed by client
+            break
+
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            req = json.loads(line)
+        except Exception as e:
+            raw_stdout.write(json.dumps({"event": "error", "message": f"Invalid JSON: {e}"}) + "\n")
+            raw_stdout.flush()
+            continue
+
+        req_id = req.get("id", "req")
+        action = req.get("action")
+        args = req.get("args", {})
+
+        if action == "ping":
+            raw_stdout.write(json.dumps({"id": req_id, "event": "pong"}) + "\n")
+            raw_stdout.flush()
+            continue
+        elif action == "shutdown":
+            raw_stdout.write(json.dumps({"id": req_id, "event": "exit", "code": 0}) + "\n")
+            raw_stdout.flush()
+            break
+
+        out_stream = DaemonEventWriter(req_id, "stdout", raw_stdout)
+        err_stream = DaemonEventWriter(req_id, "stderr", raw_stdout)
+
+        orig_out = sys.stdout
+        orig_err = sys.stderr
+        sys.stdout = out_stream
+        sys.stderr = err_stream
+
+        exit_code = 0
+        try:
+            dispatch_action(action, args)
+        except SystemExit as se:
+            exit_code = se.code if isinstance(se.code, int) else (1 if se.code else 0)
+        except Exception as e:
+            exit_code = 1
+            err_stream.write(f"ERROR: Execution failed: {e}\n")
+        finally:
+            sys.stdout = orig_out
+            sys.stderr = orig_err
+            raw_stdout.write(json.dumps({"id": req_id, "event": "exit", "code": exit_code}) + "\n")
+            raw_stdout.flush()
+
+
 def main():
+    if "--daemon" in sys.argv:
+        handle_daemon_mode()
+        return
     if "--ipc" in sys.argv:
         handle_ipc_mode()
         return
@@ -1433,6 +1627,13 @@ def main():
     p_gfh.add_argument("name")
     p_gfh.add_argument("-n", "--limit", type=int, default=3)
 
+    # find-fn
+    p_ff = sub.add_parser("find-fn")
+    p_ff.add_argument("name")
+    p_ff.add_argument("path", nargs="?", default=".")
+    p_ff.add_argument("--exact", action="store_true")
+    p_ff.add_argument("--max", dest="max_results", type=int, default=30)
+
     args = parser.parse_args()
 
     if args.cmd == "view":
@@ -1441,6 +1642,8 @@ def main():
         cmd_outline(args.path)
     elif args.cmd == "get-fn":
         cmd_get_fn(args.path, args.name)
+    elif args.cmd == "find-fn":
+        cmd_find_fn(args.name, args.path, args.exact, args.max_results)
     elif args.cmd == "write":
         cmd_write(args.path, args.content, args.append)
     elif args.cmd == "patch":

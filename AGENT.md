@@ -16,6 +16,7 @@
 #### 1. Code Navigation & Slicing
 * `agentbox outline <file>` — extracts AST classes and function signatures with line ranges (~120 tokens vs 3,000).
 * `agentbox get-fn <file> <name>` — extracts exact target function or class definition.
+* `agentbox find-fn <name> [path]` — scans project AST to locate where a function or class is defined across files.
 * `agentbox view <file> --start N --end M` — views an exact line slice with 1-indexed numbers.
 
 #### 2. Safe File Writing & Atomic Patching
