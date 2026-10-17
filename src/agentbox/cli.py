@@ -22,10 +22,13 @@ from .client import execute_action, status_daemon, stop_daemon
 
 
 class AgentBoxParser(argparse.ArgumentParser):
-    """Custom parser that allows flexible command trailing flags for run, test, spawn."""
+    """Custom parser that allows flexible command trailing flags for run, test, spawn, pip."""
     def parse_args(self, args=None, namespace=None):
         res = super().parse_args(args, namespace)
-        if getattr(res, "cmd", None) in ("run", "test", "spawn") and hasattr(res, "command"):
+        if getattr(res, "cmd", None) == "outline" and hasattr(res, "path"):
+            if isinstance(res.path, list) and len(res.path) == 1:
+                res.path = res.path[0]
+        if getattr(res, "cmd", None) in ("run", "test", "spawn", "pip") and hasattr(res, "command"):
             cmd_list = res.command or []
             new_cmd = []
             i = 0
@@ -119,14 +122,13 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_view.add_argument("--end", type=int, default=100, help="End line (default: 100)")
 
     # outline
-    p_out = sub.add_parser("outline", help="Extract AST outline (classes, functions, methods)")
-    p_out.add_argument("path", help="Path to file (Python, Rust, JS, TS, C, Go)")
+    p_out = sub.add_parser("outline", help="Extract AST outline (classes, functions, methods) for one or more files/dirs")
+    p_out.add_argument("path", nargs="+", help="Path(s) to file or directory (Python, Rust, JS, TS, C, Go)")
 
     # get-fn
-    # get-fn
-    p_fn = sub.add_parser("get-fn", help="Extract specific function or class definition")
+    p_fn = sub.add_parser("get-fn", help="Extract specific function, method (Class.method), or class definition")
     p_fn.add_argument("path", help="Path to file")
-    p_fn.add_argument("name", help="Name of function or class")
+    p_fn.add_argument("name", help="Name of function, class, or ClassName.method_name")
 
     # write
     p_write = sub.add_parser("write", help="Safely write or append content to file without bash quoting issues")
@@ -136,11 +138,23 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_write.add_argument("--append", action="store_true", help="Append instead of overwrite")
 
     # patch
-    p_patch = sub.add_parser("patch", help="Atomic find-and-replace with auto-backup")
+    p_patch = sub.add_parser("patch", help="Atomic find-and-replace with auto-backup and Python AST validation")
     p_patch.add_argument("path", help="Path to file")
-    p_patch.add_argument("--old", required=True, help="Exact target text to replace")
-    p_patch.add_argument("--new", required=True, help="Replacement text")
+    p_patch.add_argument("--old", default=None, help="Target text to replace")
+    p_patch.add_argument("--new", default=None, help="Replacement text")
+    p_patch.add_argument("--old-file", default=None, help="Read target text to replace from a local file")
+    p_patch.add_argument("--new-file", default=None, help="Read replacement text from a local file")
     p_patch.add_argument("--all", action="store_true", help="Replace all occurrences (default: exactly 1)")
+    p_patch.add_argument("--no-check", dest="check_syntax", action="store_false", help="Skip Python AST syntax check")
+
+    # patch-lines
+    p_pl = sub.add_parser("patch-lines", help="Atomically replace a 1-indexed line range [start..end] with new content")
+    p_pl.add_argument("path", help="Path to file")
+    p_pl.add_argument("--start", type=int, required=True, help="Start line (1-indexed, inclusive)")
+    p_pl.add_argument("--end", type=int, required=True, help="End line (1-indexed, inclusive)")
+    p_pl.add_argument("--content", default=None, help="Replacement text (or pass --stdin)")
+    p_pl.add_argument("--stdin", action="store_true", help="Read replacement content from stdin")
+    p_pl.add_argument("--no-check", dest="check_syntax", action="store_false", help="Skip Python AST syntax check")
 
     # rollback
     p_rb = sub.add_parser("rollback", help="Restore file from automatic .bak backup")
@@ -170,6 +184,24 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_test.add_argument("--max-lines", type=int, default=30, help="Max failure traceback lines to output")
     p_test.add_argument("--timeout", type=int, default=default_cfg.get("timeout", None), help="Timeout in seconds")
     p_test.add_argument("command", nargs=argparse.REMAINDER, help="Test command to run (pytest, cargo test, npm test, etc.)")
+
+    # pip
+    p_pip = sub.add_parser("pip", help="Run pip inside isolated virtualenv (auto-creates .agentbox/venv if needed)")
+    p_pip.add_argument("--venv", dest="cmd_venv", default=None, help="Target virtualenv path")
+    p_pip.add_argument("command", nargs=argparse.REMAINDER, help="Arguments passed to pip (e.g. install pytest)")
+
+    # stats
+    p_stats = sub.add_parser("stats", help="Display token savings and command execution dashboard")
+    p_stats.add_argument("--clear", action="store_true", help="Clear recorded statistics")
+
+    # batch
+    p_batch = sub.add_parser("batch", help="Execute multiple AgentBox actions in a single call to save agent turns")
+    p_batch.add_argument("steps", nargs="?", default=None, help="JSON array of action steps")
+    p_batch.add_argument("--stdin", action="store_true", help="Read JSON batch array from stdin")
+    p_batch.add_argument("--continue-on-error", dest="stop_on_error", action="store_false", help="Continue executing remaining steps if a step fails")
+
+    # mcp
+    sub.add_parser("mcp", help="Start built-in Model Context Protocol (MCP) server over stdio")
 
     # spawn
     p_spawn = sub.add_parser("spawn", help="Spawn detached background process (survives disconnects)")
@@ -242,6 +274,12 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_ff.add_argument("path", nargs="?", default="", help="Directory to search (default: current working directory)")
     p_ff.add_argument("--exact", action="store_true", help="Exact name match only (case-sensitive)")
     p_ff.add_argument("--max", dest="max_results", type=int, default=30, help="Max results (default: 30)")
+
+    # refs
+    p_refs = sub.add_parser("refs", help="Find symbol references (imports, calls, attributes, inheritance) across project")
+    p_refs.add_argument("name", help="Symbol name to search references for")
+    p_refs.add_argument("path", nargs="?", default="", help="Directory or file to search (default: current working directory)")
+    p_refs.add_argument("--max", dest="max_results", type=int, default=40, help="Max results (default: 40)")
 
     # daemon
     p_daemon = sub.add_parser("daemon", help="Manage persistent background daemon connections")
@@ -378,6 +416,10 @@ def main(argv: Optional[List[str]] = None):
     cwd = args.cwd
     venv = getattr(args, "cmd_venv", None) or getattr(args, "venv", None) or cfg.get("venv", "")
 
+    if args.cmd == "mcp":
+        from .mcp_server import run_mcp_server
+        return run_mcp_server(host=host, cwd=cwd, venv=venv)
+
     def run_action(action: str, act_args: dict) -> int:
         if getattr(args, "no_daemon", False):
             return execute_action(host, cwd, action, act_args, use_daemon=False)
@@ -391,6 +433,8 @@ def main(argv: Optional[List[str]] = None):
         code = run_action("get_fn", {"path": args.path, "name": args.name})
     elif args.cmd == "find-fn":
         code = run_action("find_fn", {"name": args.name, "path": args.path or cwd, "exact": args.exact, "max": args.max_results})
+    elif args.cmd == "refs":
+        code = run_action("refs", {"name": args.name, "path": args.path or cwd, "max": args.max_results})
     elif args.cmd == "write":
         content = args.content
         if content is None:
@@ -401,7 +445,39 @@ def main(argv: Optional[List[str]] = None):
                 return 1
         code = run_action("write", {"path": args.path, "content": content, "append": args.append})
     elif args.cmd == "patch":
-        code = run_action("patch", {"path": args.path, "old": args.old, "new": args.new, "all": args.all})
+        old_val = args.old
+        new_val = args.new
+        if old_val is None and getattr(args, "old_file", None):
+            from pathlib import Path as _P
+            old_val = _P(args.old_file).read_text(encoding="utf-8")
+        if new_val is None and getattr(args, "new_file", None):
+            from pathlib import Path as _P
+            new_val = _P(args.new_file).read_text(encoding="utf-8")
+        if old_val is None or new_val is None:
+            print("ERROR: Provide --old and --new (or --old-file / --new-file).", file=sys.stderr)
+            return 1
+        code = run_action("patch", {
+            "path": args.path,
+            "old": old_val,
+            "new": new_val,
+            "all": args.all,
+            "check_syntax": getattr(args, "check_syntax", True)
+        })
+    elif args.cmd == "patch-lines":
+        content = args.content
+        if content is None:
+            if getattr(args, "stdin", False):
+                content = sys.stdin.read()
+            else:
+                print("ERROR: Provide replacement via --content \"...\" or pass --stdin.", file=sys.stderr)
+                return 1
+        code = run_action("patch_lines", {
+            "path": args.path,
+            "start": args.start,
+            "end": args.end,
+            "content": content,
+            "check_syntax": getattr(args, "check_syntax", True)
+        })
     elif args.cmd == "rollback":
         code = run_action("rollback", {"path": args.path})
     elif args.cmd == "tree":
@@ -420,6 +496,23 @@ def main(argv: Optional[List[str]] = None):
             print("ERROR: Missing test command to run. Usage: agentbox test <test_cmd>", file=sys.stderr)
             return 1
         code = run_action("test", {"cmd": cmd_str, "cwd": cwd, "timeout": args.timeout, "max_lines": args.max_lines, "venv": venv})
+    elif args.cmd == "pip":
+        pip_str = _resolve_cmd_string(args.command)
+        if not pip_str:
+            print("ERROR: Missing pip arguments. Usage: agentbox pip install <package>", file=sys.stderr)
+            return 1
+        code = run_action("pip", {"pip_args": pip_str, "cwd": cwd, "venv": venv})
+    elif args.cmd == "stats":
+        code = run_action("stats", {"clear": args.clear})
+    elif args.cmd == "batch":
+        steps_raw = args.steps
+        if steps_raw is None:
+            if getattr(args, "stdin", False):
+                steps_raw = sys.stdin.read()
+            else:
+                print("ERROR: Provide JSON steps argument or pass --stdin.", file=sys.stderr)
+                return 1
+        code = run_action("batch", {"steps": steps_raw, "stop_on_error": getattr(args, "stop_on_error", True)})
     elif args.cmd == "spawn":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:

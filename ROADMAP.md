@@ -19,7 +19,7 @@
 
 ---
 
-## 📌 RFC: Строгая изоляция Python в `.agentbox/venv` (Hermetic Environment)
+## ✅ Реализовано: Строгая изоляция Python в `.agentbox/venv` (Hermetic Environment) + AST/MCP/Batch/Patch Upgrades
 
 ### 1. Цель и концепция
 Обеспечить абсолютную изоляцию и предсказуемость исполнения Python-кода как на удаленном сервере (по SSH), так и на локальной машине:

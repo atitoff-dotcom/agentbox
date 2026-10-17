@@ -474,10 +474,20 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
         return execute_local_action(cwd, action, args)
 
     # Normalize remote paths
+    def _norm_remote_path(val: str) -> str:
+        s = str(val)
+        if not s.startswith("/") and not s.startswith("~") and cwd:
+            return f"{cwd.rstrip('/')}/{s}"
+        return s
+
     if "path" in args and args["path"]:
-        p = str(args["path"])
-        if not p.startswith("/") and not p.startswith("~") and cwd:
-            args["path"] = f"{cwd.rstrip('/')}/{p}"
+        if isinstance(args["path"], list):
+            args["path"] = [_norm_remote_path(x) for x in args["path"]]
+        else:
+            args["path"] = _norm_remote_path(args["path"])
+
+    if "paths" in args and isinstance(args["paths"], list):
+        args["paths"] = [_norm_remote_path(x) for x in args["paths"]]
 
     if "cwd" in args and not args["cwd"]:
         args["cwd"] = cwd

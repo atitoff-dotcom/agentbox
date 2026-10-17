@@ -6,28 +6,33 @@
 
 ### 🚫 STRICTLY BANNED COMMANDS OVER SSH:
 1. DO NOT read entire files: never use `cat <file>` or download full 200+ line files -> USE `agentbox outline <file>` or `agentbox view <file>`.
-2. DO NOT search files using raw find/grep: never use `find .` or raw `grep` -> USE `agentbox tree` or `agentbox grep "<query>"`.
+2. DO NOT search files using raw find/grep: never use `find .` or raw `grep` -> USE `agentbox tree`, `agentbox refs <symbol>`, or `agentbox grep "<query>"`.
 3. DO NOT stream noisy builds or tests: never run raw `pytest`, `cargo build`, or `npm test` -> USE `agentbox test "<cmd>"` or `agentbox run "<cmd>"`.
-4. DO NOT write files via `cat << 'EOF'`: bash escaping often breaks quotes and symbols -> USE `agentbox write <file>` or `agentbox patch <file>`.
+4. DO NOT write files via `cat << 'EOF'`: bash escaping often breaks quotes and symbols -> USE `agentbox write <file>`, `agentbox patch <file>`, or `agentbox patch-lines <file>`.
 5. DO NOT dump raw git diff or log: never run raw `git diff` or `git log -p` -> USE `agentbox diff` or `agentbox git-log` / `agentbox git-view`.
 
 ### ✅ MANDATORY AGENTBOX CLI TOOLSET:
 
 #### 1. Code Navigation & Slicing
-* `agentbox outline <file>` — extracts AST classes and function signatures with line ranges (~120 tokens vs 3,000).
-* `agentbox get-fn <file> <name>` — extracts exact target function or class definition.
+* `agentbox outline <file> [files...]` — extracts AST classes and function signatures with line ranges (~120 tokens vs 3,000).
+* `agentbox get-fn <file> <name>` — extracts exact target function, class, or `ClassName.method_name` definition.
 * `agentbox find-fn <name> [path]` — scans project AST to locate where a function or class is defined across files.
+* `agentbox refs <name> [path]` — finds all symbol references (imports, calls, attributes, inheritance) across the codebase.
 * `agentbox view <file> --start N --end M` — views an exact line slice with 1-indexed numbers.
 
 #### 2. Safe File Writing & Atomic Patching
 * `agentbox write <file> --content "..."` — safely writes/overwrites file without ANY bash quote escaping bugs.
-* `agentbox patch <file> --old "..." --new "..."` — in-place atomic search-and-replace with auto-backup (`.bak`).
+* `agentbox patch <file> --old "..." --new "..."` — in-place atomic search-and-replace with auto-backup (`.bak`), CRLF normalization, and Python AST validation.
+* `agentbox patch-lines <file> --start N --end M --content "..."` — replaces 1-indexed line range `[N..M]` with auto-backup and AST check.
 * `agentbox rollback <file>` — restores from backup if an edit caused errors.
 
-#### 3. Silent Builds, Tests & Background Tasks
-* `agentbox test "<test_cmd>"` — silent test runner; suppresses passing tests and extracts high-signal failure tracebacks (auto-detects .venv/venv or --venv).
-* `agentbox run "<build_cmd>"` — suppresses intermediate noisy terminal stream, buffering to log (auto-detects .venv/venv or --venv).
-* `agentbox spawn "<cmd>"` / `agentbox status <id>` / `agentbox logs <id> -f` — detached background tasks (auto-detects .venv/venv or --venv).
+#### 3. Silent Builds, Tests, Isolated Venv & Batching
+* `agentbox test "<test_cmd>"` — silent test runner; suppresses passing tests and extracts high-signal failure tracebacks (auto-detects `.agentbox/venv` / `.venv`).
+* `agentbox run "<build_cmd>"` — suppresses intermediate noisy terminal stream, buffering to log (auto-detects `.agentbox/venv` / `.venv`).
+* `agentbox pip <args>` — runs `pip` inside isolated `.agentbox/venv` (auto-creating it if no virtualenv exists).
+* `agentbox batch '<json_steps>'` — executes multiple AgentBox actions in a single turn.
+* `agentbox stats` — displays token savings and execution statistics dashboard.
+* `agentbox spawn "<cmd>"` / `agentbox status <id>` / `agentbox logs <id> -f` — detached background tasks.
 
 #### 4. Architecture & Knowledge Graph
 * `agentbox graphify-query "<question>"` — queries code connections and God nodes directly on host without dumping large JSON.
