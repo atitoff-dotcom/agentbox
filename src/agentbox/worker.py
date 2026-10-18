@@ -19,6 +19,45 @@ import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Union
 
+# Force UTF-8 encoding on standard I/O streams across all platforms
+if hasattr(sys.stdin, "reconfigure"):
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    except Exception:
+        pass
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+def read_stdin_utf8() -> str:
+    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, and other encodings."""
+    try:
+        if hasattr(sys.stdin, "buffer"):
+            raw_bytes = sys.stdin.buffer.read()
+            try:
+                return raw_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                try:
+                    return raw_bytes.decode("cp1251")
+                except UnicodeDecodeError:
+                    return raw_bytes.decode("utf-8-sig", errors="replace")
+        text = sys.stdin.read()
+        return text.lstrip("\ufeff")
+    except Exception:
+        try:
+            return sys.stdin.read().lstrip("\ufeff")
+        except Exception:
+            return ""
+
+
 DEFAULT_IGNORED_DIRS = {
     ".git", ".agentbox", ".venv", "venv", "env", "__pycache__", "node_modules",
     "target", "dist", "build", ".vscode", ".idea", ".agents",
@@ -195,6 +234,9 @@ def prepare_env_for_cmd(
     should_create = auto_create or (os.environ.get("AGENTBOX_AUTO_VENV") == "1")
     venv_dir = ensure_virtualenv(work_dir, explicit_venv) if should_create else find_virtualenv(work_dir, explicit_venv)
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["LC_ALL"] = "C.UTF-8"
+    env["LANG"] = "C.UTF-8"
     if venv_dir:
         bin_dir = _get_venv_bin_dir(venv_dir)
         if bin_dir:
@@ -862,7 +904,7 @@ def cmd_patch_lines(
         sys.exit(1)
 
     if content is None:
-        content = sys.stdin.read()
+        content = read_stdin_utf8()
 
     try:
         raw_bytes = p.read_bytes()
@@ -929,12 +971,12 @@ def cmd_write(path: str, content: str = None, append: bool = False) -> None:
     """Safely writes or appends content to a file, reading from stdin if content is None."""
     p = to_path(path)
     if content is None:
-        content = sys.stdin.read()
+        content = read_stdin_utf8()
 
     p.parent.mkdir(parents=True, exist_ok=True)
     mode = "a" if append else "w"
     try:
-        with open(p, mode, encoding="utf-8") as f:
+        with open(p, mode, encoding="utf-8", newline="") as f:
             f.write(content)
         action_word = "Appended to" if append else "Wrote"
         print(f"OK: {action_word} {p.name} ({len(content)} chars, {len(content.splitlines())} lines).")
@@ -1075,7 +1117,7 @@ def cmd_git_status(path: str = ".") -> None:
         sys.exit(1)
 
     # 1. Get porcelain status
-    res = subprocess.run(["git", "status", "--porcelain=v1", "-uall"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    res = subprocess.run(["git", "status", "--porcelain=v1", "-uall"], cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if res.returncode != 0:
         print(f"ERROR: git status failed: {res.stderr.strip()}", file=sys.stderr)
         sys.exit(res.returncode)
@@ -1087,9 +1129,9 @@ def cmd_git_status(path: str = ".") -> None:
 
     # 2. Get numstat for diff counts (+N, -M)
     numstat_map = {}
-    diff_res = subprocess.run(["git", "diff", "--numstat", "HEAD"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    diff_res = subprocess.run(["git", "diff", "--numstat", "HEAD"], cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if diff_res.returncode != 0:
-        diff_res = subprocess.run(["git", "diff", "--numstat"], cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+        diff_res = subprocess.run(["git", "diff", "--numstat"], cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if diff_res.returncode == 0:
         for line in diff_res.stdout.splitlines():
             parts = line.split("\t")
@@ -1137,7 +1179,7 @@ def cmd_diff(path: str = "", rev: str = None, cached: bool = False, max_lines: i
         for pattern in GIT_IGNORE_DIFF_PATTERNS:
             cmd.append(f":(exclude){pattern}")
 
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: git diff failed: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -1172,7 +1214,7 @@ def cmd_git_log(path: str = "", limit: int = 5) -> None:
         except ValueError:
             pass
 
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: git log failed: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -1201,7 +1243,7 @@ def cmd_git_view(path: str, rev: str = "HEAD", start: int = 1, end: int = 100) -
         rel_path = str(p).replace("\\", "/")
 
     target = f"{rev}:{rel_path}"
-    proc = subprocess.run(["git", "show", target], cwd=str(git_root), capture_output=True, text=True, errors="replace", **win_no_window_kwargs())
+    proc = subprocess.run(["git", "show", target], cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if proc.returncode != 0:
         print(f"ERROR: Failed to retrieve {target}: {proc.stderr.strip()}", file=sys.stderr)
         sys.exit(proc.returncode)
@@ -1231,7 +1273,7 @@ def cmd_git_fn_history(path: str, name: str, limit: int = 3) -> None:
 
     # 1. Try git log -L :<funcname>:<file> (AST function tracing in git)
     cmd = ["git", "log", f"-n{limit}", "-w", f"-L:{name}:{rel_path}"]
-    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    proc = subprocess.run(cmd, cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if proc.returncode == 0 and proc.stdout.strip():
         lines = proc.stdout.splitlines()
         capped = lines[:80]
@@ -1243,7 +1285,7 @@ def cmd_git_fn_history(path: str, name: str, limit: int = 3) -> None:
 
     # 2. Fallback to git log -S <name> -p
     fb_cmd = ["git", "log", f"-n{limit}", "-w", "-S", name, "-p", "-U2", "--", rel_path]
-    fb_proc = subprocess.run(fb_cmd, cwd=str(git_root), capture_output=True, text=True, **win_no_window_kwargs())
+    fb_proc = subprocess.run(fb_cmd, cwd=str(git_root), capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     if fb_proc.returncode == 0 and fb_proc.stdout.strip():
         lines = fb_proc.stdout.splitlines()
         capped = lines[:80]
@@ -1319,6 +1361,8 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 **win_no_window_kwargs()
             )
             proc.wait(timeout=timeout)
@@ -1540,6 +1584,8 @@ def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 **win_no_window_kwargs()
             )
             proc.wait(timeout=timeout)
@@ -2012,7 +2058,7 @@ def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, v
 def cmd_batch(steps: Union[str, List[Dict[str, Any]]] = None, stop_on_error: bool = True) -> None:
     """Executes multiple AgentBox actions in a single worker invocation to save agent turns."""
     if steps is None:
-        raw_in = sys.stdin.read().strip()
+        raw_in = read_stdin_utf8().strip()
         if not raw_in:
             print("ERROR: Empty batch input", file=sys.stderr)
             sys.exit(1)
@@ -2150,8 +2196,9 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
 
 def handle_ipc_mode() -> None:
     """Reads a single JSON request from stdin and executes it without bash shell escaping."""
+    raw_in = read_stdin_utf8()
     try:
-        payload = json.loads(sys.stdin.read())
+        payload = json.loads(raw_in)
     except Exception as e:
         print(f"ERROR: Invalid JSON input: {e}", file=sys.stderr)
         sys.exit(1)
@@ -2172,7 +2219,7 @@ class DaemonEventWriter:
         if not s:
             return 0
         try:
-            msg = json.dumps({"id": self.req_id, "event": self.event_type, "data": s})
+            msg = json.dumps({"id": self.req_id, "event": self.event_type, "data": s}, ensure_ascii=False)
             self.raw_stream.write(msg + "\n")
             self.raw_stream.flush()
         except Exception:

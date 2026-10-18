@@ -8,6 +8,24 @@ Includes Persistent Stdio-Daemon Bridge for sub-millisecond remote command execu
 
 import os
 import sys
+
+# Force UTF-8 encoding on standard I/O streams across all platforms
+if hasattr(sys.stdin, "reconfigure"):
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    except Exception:
+        pass
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import json
 import time
 import socket
@@ -74,7 +92,7 @@ def ensure_remote_worker(host: str, force: bool = False) -> None:
 
     # Check remote hash
     check_cmd = ["ssh", host, f"sha256sum {REMOTE_WORKER_PATH} 2>/dev/null || echo NONE"]
-    proc = subprocess.run(check_cmd, capture_output=True, text=True, **win_no_window_kwargs())
+    proc = subprocess.run(check_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", **win_no_window_kwargs())
     remote_out = proc.stdout.strip()
     remote_hash = remote_out.split()[0] if remote_out else "NONE"
 
@@ -169,7 +187,7 @@ def handle_bridge_client(conn: socket.socket, token: str, ssh_proc: subprocess.P
             return False
 
         # Forward request to ssh_proc stdin
-        ssh_req = json.dumps({"id": req_id, "action": action, "args": req.get("args", {})})
+        ssh_req = json.dumps({"id": req_id, "action": action, "args": req.get("args", {})}, ensure_ascii=False)
         ssh_proc.stdin.write(ssh_req + "\n")
         ssh_proc.stdin.flush()
 
@@ -219,6 +237,10 @@ def run_bridge_server(host: str, idle_timeout: int = 1800) -> None:
     # Launch SSH process in headless batch mode
     ensure_remote_worker(host)
     ssh_cmd = ["ssh", "-T", "-o", "BatchMode=yes", host, f"python3 {REMOTE_WORKER_PATH} --daemon"]
+    ssh_env = os.environ.copy()
+    ssh_env["PYTHONIOENCODING"] = "utf-8"
+    ssh_env["LC_ALL"] = "C.UTF-8"
+    ssh_env["LANG"] = "C.UTF-8"
     try:
         ssh_proc = subprocess.Popen(
             ssh_cmd,
@@ -226,7 +248,10 @@ def run_bridge_server(host: str, idle_timeout: int = 1800) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
+            env=ssh_env,
             **win_no_window_kwargs()
         )
     except Exception:
@@ -363,7 +388,7 @@ def execute_via_bridge(host: str, action: str, args: Dict[str, Any]) -> Optional
             "action": action,
             "args": args
         }
-        sock.sendall((json.dumps(req) + "\n").encode("utf-8"))
+        sock.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
 
         exit_code = 0
         got_exit = False
@@ -500,13 +525,33 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
 
     # 2. Fallback path: direct SSH IPC over stdin
     ensure_remote_worker(host)
-    payload = json.dumps({"action": action, "args": args})
+    payload = json.dumps({"action": action, "args": args}, ensure_ascii=False)
     cmd = ["ssh", host, f"python3 {REMOTE_WORKER_PATH} --ipc"]
+    ssh_env = os.environ.copy()
+    ssh_env["PYTHONIOENCODING"] = "utf-8"
+    ssh_env["LC_ALL"] = "C.UTF-8"
+    ssh_env["LANG"] = "C.UTF-8"
     try:
-        proc = subprocess.run(cmd, input=payload, text=True, **win_no_window_kwargs())
+        proc = subprocess.run(
+            cmd,
+            input=payload,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=ssh_env,
+            **win_no_window_kwargs()
+        )
         if proc.returncode == 127:
             ensure_remote_worker(host, force=True)
-            proc = subprocess.run(cmd, input=payload, text=True, **win_no_window_kwargs())
+            proc = subprocess.run(
+                cmd,
+                input=payload,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=ssh_env,
+                **win_no_window_kwargs()
+            )
         return proc.returncode
     except KeyboardInterrupt:
         return 0

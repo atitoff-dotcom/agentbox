@@ -9,12 +9,43 @@ import sys
 import argparse
 from typing import List, Optional, Any, Union
 
-if sys.platform == "win32":
+if hasattr(sys.stdin, "reconfigure"):
+    try:
+        sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    except Exception:
+        pass
+if hasattr(sys.stdout, "reconfigure"):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+
+
+def read_stdin_utf8() -> str:
+    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, and other encodings."""
+    try:
+        if hasattr(sys.stdin, "buffer"):
+            raw_bytes = sys.stdin.buffer.read()
+            try:
+                return raw_bytes.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                try:
+                    return raw_bytes.decode("cp1251")
+                except UnicodeDecodeError:
+                    return raw_bytes.decode("utf-8-sig", errors="replace")
+        text = sys.stdin.read()
+        return text.lstrip("\ufeff")
+    except Exception:
+        try:
+            return sys.stdin.read().lstrip("\ufeff")
+        except Exception:
+            return ""
+
 
 from . import __version__
 from .config import get_config, save_global_config, save_local_config, generate_rules, get_tasks, add_task, remove_task
@@ -439,7 +470,7 @@ def main(argv: Optional[List[str]] = None):
         content = args.content
         if content is None:
             if getattr(args, "stdin", False):
-                content = sys.stdin.read()
+                content = read_stdin_utf8()
             else:
                 print("ERROR: Provide content via --content \"...\" or pass --stdin to read from standard input.", file=sys.stderr)
                 return 1
@@ -467,7 +498,7 @@ def main(argv: Optional[List[str]] = None):
         content = args.content
         if content is None:
             if getattr(args, "stdin", False):
-                content = sys.stdin.read()
+                content = read_stdin_utf8()
             else:
                 print("ERROR: Provide replacement via --content \"...\" or pass --stdin.", file=sys.stderr)
                 return 1
@@ -508,7 +539,7 @@ def main(argv: Optional[List[str]] = None):
         steps_raw = args.steps
         if steps_raw is None:
             if getattr(args, "stdin", False):
-                steps_raw = sys.stdin.read()
+                steps_raw = read_stdin_utf8()
             else:
                 print("ERROR: Provide JSON steps argument or pass --stdin.", file=sys.stderr)
                 return 1
