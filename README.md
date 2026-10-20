@@ -123,12 +123,15 @@ agentbox find-fn Bank --exact
   archive/app/bank/models.py:13   | class Bank(BasicSecureModel)
 ```
 
-#### `agentbox view <file> [--start N] [--end M]`
-Displays an exact line slice with 1-indexed line numbers:
+#### `agentbox view <file> [--start N --end M] [--tail N]`
+Displays an exact line slice with 1-indexed line numbers (supports `--tail N` or negative `--start -N`):
 ```bash
+# Slice specific lines:
 agentbox view src/gateway.py --start 48 --end 65
-```
 
+# View last 50 lines of logs or files in 1 step:
+agentbox view logs/app.log --tail 50
+```
 ---
 
 ### 2. Silent & Background Process Runner
@@ -206,8 +209,18 @@ agentbox kill bg_849201
 
 ### 3. File Operations & Safe Atomic Patching
 
-#### `agentbox write <file> [--content "..."] [--stdin] [--append]`
-Safely creates or appends to a file without any bash quote escaping issues (supports stdin streaming via `--stdin`):
+#### `agentbox patch-lines <file> --start N --end M [--content "..." | --base64 <b64> | --stdin]`
+**The primary and safest way to edit code.** Replaces line range `[N..M]` with automatic AST syntax validation and auto-backup stored cleanly in `.agentbox/backups/`:
+```bash
+# Direct replacement:
+agentbox patch-lines src/main.py --start 10 --end 15 --content "    return True\n"
+
+# Immune to PowerShell / SSH quoting & Cyrillic encoding bugs via Base64:
+agentbox patch-lines src/main.py --start 10 --end 15 --base64 <b64_string>
+```
+
+#### `agentbox write <file> [--content "..."] [--base64 <b64>] [--stdin] [--append]`
+Safely creates or appends to a file without shell quote escaping issues:
 ```bash
 agentbox write src/settings.py --content 'DEBUG = True\nPORT = 8080'
 # Or via pipeline:
@@ -215,17 +228,22 @@ cat config.json | agentbox write config.json --stdin
 ```
 
 #### `agentbox patch <file> --old "<exact_code>" --new "<replacement>"`
-Safely replaces code with automatic `.bak` backup creation:
+Safely replaces code block with automatic backup in `.agentbox/backups/` and Python AST validation:
 ```bash
 agentbox patch src/config.py --old 'PORT = 8000' --new 'PORT = 9000'
-# Output: OK: Replaced 1 occurrence(s) in config.py. Backup: config.py.bak
 ```
 
 #### `agentbox rollback <file>`
-Restores file from backup in case of errors:
+Restores file from `.agentbox/backups/` keeping the Git working tree clean:
 ```bash
 agentbox rollback src/config.py
 # Output: OK: Restored config.py from backup and removed backup.
+```
+
+#### `agentbox batch '<json_steps>'` / `agentbox batch --base64 <b64>`
+Executes multiple AgentBox actions (view, patch-lines, test, etc.) in a single turn to save LLM turns:
+```bash
+agentbox batch '[{"action": "view", "path": "src/app.py", "start": 1, "end": 20}, {"action": "patch_lines", "path": "src/app.py", "start": 5, "end": 7, "content": "    pass\n"}]'
 ```
 
 ---
@@ -238,13 +256,15 @@ Prints clean directory structure while automatically ignoring `.git`, `node_modu
 agentbox tree --depth 2
 ```
 
-#### `agentbox grep "<query>" [path] [--max N]`
-Fast token-limited search across text files:
+#### `agentbox grep "<query>" [path_or_file] [-F] [--max N]`
+Fast token-limited search across directories **OR a single file** (regex or `-F` exact fixed substring):
 ```bash
+# Search directory:
 agentbox grep "handle_packet" src/ --max 10
-```
 
----
+# Search single file with exact match (-F):
+agentbox grep "tasks.list" src/App.svelte -F
+```
 
 ### 5. Knowledge Graph & Architecture (`graphify`)
 

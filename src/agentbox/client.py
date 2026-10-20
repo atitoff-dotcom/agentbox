@@ -514,7 +514,32 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
     if "paths" in args and isinstance(args["paths"], list):
         args["paths"] = [_norm_remote_path(x) for x in args["paths"]]
 
-    if "cwd" in args and not args["cwd"]:
+    if action == "batch":
+        raw_steps = args.get("steps")
+        if isinstance(raw_steps, str):
+            try:
+                parsed_steps = json.loads(raw_steps)
+                if isinstance(parsed_steps, list):
+                    for step in parsed_steps:
+                        if isinstance(step, dict):
+                            if "path" in step and step["path"]:
+                                step["path"] = _norm_remote_path(step["path"])
+                            step_args = step.get("args")
+                            if isinstance(step_args, dict) and "path" in step_args and step_args["path"]:
+                                step_args["path"] = _norm_remote_path(step_args["path"])
+                    args["steps"] = json.dumps(parsed_steps, ensure_ascii=False)
+            except Exception:
+                pass
+        elif isinstance(raw_steps, list):
+            for step in raw_steps:
+                if isinstance(step, dict):
+                    if "path" in step and step["path"]:
+                        step["path"] = _norm_remote_path(step["path"])
+                    step_args = step.get("args")
+                    if isinstance(step_args, dict) and "path" in step_args and step_args["path"]:
+                        step_args["path"] = _norm_remote_path(step_args["path"])
+
+    if "cwd" not in args or not args["cwd"]:
         args["cwd"] = cwd
 
     # 1. Fast path: execute via persistent daemon bridge

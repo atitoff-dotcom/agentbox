@@ -47,11 +47,11 @@ class TestUtf8Cyrillic(unittest.TestCase):
         worker.cmd_patch(str(target), "русский_текст_1", "русский_текст_2")
         self.assertEqual(target.read_text(encoding="utf-8"), 'MSG = "русский_текст_2"\n')
 
-        # Check backup file
-        bak = target.with_suffix(".py.bak")
+        # Check backup file is stored cleanly in backups dir
+        bak = worker._get_backup_path(target)
         self.assertTrue(bak.is_file())
+        self.assertFalse(target.with_suffix(".py.bak").is_file())
         self.assertEqual(bak.read_text(encoding="utf-8"), 'MSG = "русский_текст_1"\n')
-
     def test_cyrillic_patch_lines(self):
         target = self.dir_path / "data.txt"
         target.write_text("Заголовок\nСтарый пункт\nКонец\n", encoding="utf-8")

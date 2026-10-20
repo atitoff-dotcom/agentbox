@@ -14,6 +14,7 @@ import json
 import time
 import signal
 import shutil
+import base64
 import subprocess
 import argparse
 from pathlib import Path
@@ -37,18 +38,32 @@ if hasattr(sys.stderr, "reconfigure"):
         pass
 
 
+def decode_base64_text(val: str) -> str:
+    """Decodes a base64 string to utf-8 text safely, immune to shell quoting/encoding bugs."""
+    try:
+        raw = base64.b64decode(val.strip())
+        for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        print(f"ERROR: Failed to decode base64 input: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def read_stdin_utf8() -> str:
-    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, and other encodings."""
+    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, CP866, and other encodings."""
     try:
         if hasattr(sys.stdin, "buffer"):
             raw_bytes = sys.stdin.buffer.read()
-            try:
-                return raw_bytes.decode("utf-8-sig")
-            except UnicodeDecodeError:
+            for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866"):
                 try:
-                    return raw_bytes.decode("cp1251")
+                    return raw_bytes.decode(enc)
                 except UnicodeDecodeError:
-                    return raw_bytes.decode("utf-8-sig", errors="replace")
+                    continue
+            return raw_bytes.decode("utf-8-sig", errors="replace")
         text = sys.stdin.read()
         return text.lstrip("\ufeff")
     except Exception:
@@ -95,6 +110,34 @@ def _find_git_root(p: Path) -> Optional[Path]:
             return curr
         curr = curr.parent
     return None
+
+
+def _get_backup_path(target_file: Path) -> Path:
+    """Returns safe backup path inside .agentbox/backups/ instead of cluttering project tree."""
+    resolved = target_file.resolve()
+    git_root = _find_git_root(resolved)
+    if git_root:
+        backup_dir = git_root / ".agentbox" / "backups"
+        try:
+            rel = resolved.relative_to(git_root.resolve())
+            bak_name = rel.as_posix().replace("/", "__") + ".bak"
+        except ValueError:
+            bak_name = resolved.name + ".bak"
+    else:
+        backup_dir = Path.home() / ".agentbox" / "backups"
+        bak_name = f"{abs(hash(str(resolved)))}_{resolved.name}.bak"
+
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure .agentbox is ignored by git if inside repo
+        if git_root:
+            gi = git_root / ".agentbox" / ".gitignore"
+            if not gi.exists():
+                gi.write_text("*\n", encoding="utf-8")
+    except Exception:
+        pass
+
+    return backup_dir / bak_name
 
 
 def _is_venv_dir(p: Path) -> bool:
@@ -353,7 +396,7 @@ def _find_brace_block_end(lines: List[str], start_line: int) -> int:
     return min(n, start_line + 40) if not found_open else n
 
 
-def cmd_view(path: str, start: int = 1, end: int = 100) -> None:
+def cmd_view(path: str, start: int = 1, end: int = 100, tail: Optional[int] = None) -> None:
     p = to_path(path)
     if not p.is_file():
         print(f"ERROR: File not found: {path}", file=sys.stderr)
@@ -367,8 +410,19 @@ def cmd_view(path: str, start: int = 1, end: int = 100) -> None:
         sys.exit(1)
 
     total = len(lines)
-    s = max(1, start)
-    e = min(total, end)
+    if tail is not None and tail > 0:
+        s = max(1, total - tail + 1)
+        e = total
+    else:
+        if start < 0:
+            s = max(1, total + start + 1)
+            if end < 0:
+                e = max(s, min(total, total + end + 1))
+            else:
+                e = total
+        else:
+            s = max(1, start)
+            e = min(total, end)
 
     out_lines = [f"[{p.name}: lines {s}-{e} of {total}]"]
     for i in range(s, e + 1):
@@ -876,8 +930,8 @@ def cmd_patch(
             )
             sys.exit(1)
 
-    # Backup original bytes
-    bak_path = p.with_suffix(p.suffix + ".bak")
+    # Backup original bytes safely into .agentbox/backups/
+    bak_path = _get_backup_path(p)
     try:
         bak_path.write_bytes(raw_bytes)
     except Exception as e:
@@ -942,7 +996,8 @@ def cmd_patch_lines(
             )
             sys.exit(1)
 
-    bak_path = p.with_suffix(p.suffix + ".bak")
+    # Backup original bytes safely into .agentbox/backups/
+    bak_path = _get_backup_path(p)
     try:
         bak_path.write_bytes(raw_bytes)
     except Exception as e:
@@ -956,14 +1011,22 @@ def cmd_patch_lines(
 
 def cmd_rollback(path: str) -> None:
     p = to_path(path)
-    bak_path = p.with_suffix(p.suffix + ".bak")
+    bak_path = _get_backup_path(p)
     if not bak_path.is_file():
-        print(f"ERROR: Backup file {bak_path.name} not found", file=sys.stderr)
-        sys.exit(1)
+        # Fallback to legacy in-tree backup
+        legacy_bak = p.with_suffix(p.suffix + ".bak")
+        if legacy_bak.is_file():
+            bak_path = legacy_bak
+        else:
+            print(f"ERROR: Backup file for {p.name} not found (checked {bak_path.name})", file=sys.stderr)
+            sys.exit(1)
 
     bak_bytes = bak_path.read_bytes()
     p.write_bytes(bak_bytes)
-    bak_path.unlink()
+    try:
+        bak_path.unlink()
+    except Exception:
+        pass
     print(f"OK: Restored {p.name} from backup and removed backup.")
 
 
@@ -1015,7 +1078,28 @@ def cmd_tree(path: str = ".", max_depth: int = 2) -> None:
             print(f"{sub_indent}... and {len(visible_files) - 15} more files")
 
 
+def _grep_file(pattern: re.Pattern, fpath: Path, display_path: Union[str, Path], max_results: int) -> int:
+    count = 0
+    try:
+        with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
+            for idx, line in enumerate(fh, start=1):
+                if pattern.search(line):
+                    print(f"{display_path}:{idx} | {line.strip()[:120]}")
+                    count += 1
+                    if count >= max_results:
+                        return count
+    except Exception:
+        pass
+    return count
+
+
 def _grep_python(pattern: re.Pattern, root: Path, max_results: int) -> None:
+    if root.is_file():
+        count = _grep_file(pattern, root, root.name, max_results)
+        if count >= max_results:
+            print(f"... [stopped at max {max_results} results]")
+        return
+
     count = 0
     for cur_root, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS]
@@ -1024,23 +1108,16 @@ def _grep_python(pattern: re.Pattern, root: Path, max_results: int) -> None:
                 continue
             fpath = Path(cur_root) / f
             try:
-                with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
-                    for idx, line in enumerate(fh, start=1):
-                        if pattern.search(line):
-                            try:
-                                rel = fpath.relative_to(root)
-                            except ValueError:
-                                rel = fpath
-                            print(f"{rel}:{idx} | {line.strip()[:120]}")
-                            count += 1
-                            if count >= max_results:
-                                print(f"... [stopped at max {max_results} results]")
-                                return
-            except Exception:
-                pass
+                rel = fpath.relative_to(root)
+            except ValueError:
+                rel = fpath
+            count += _grep_file(pattern, fpath, rel, max_results - count)
+            if count >= max_results:
+                print(f"... [stopped at max {max_results} results]")
+                return
 
 
-def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
+def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = False) -> None:
     root = to_path(path)
     if not root.exists():
         print(f"ERROR: Path not found: {path}", file=sys.stderr)
@@ -1057,8 +1134,11 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
             "--color", "never",
             f"--max-count={max_results}",
         ]
-        for ign in DEFAULT_IGNORED_DIRS:
-            rg_cmd.extend(["-g", f"!{ign}"])
+        if fixed:
+            rg_cmd.append("-F")
+        if root.is_dir():
+            for ign in DEFAULT_IGNORED_DIRS:
+                rg_cmd.extend(["-g", f"!{ign}"])
         rg_cmd.extend([query, str(root)])
 
         try:
@@ -1081,10 +1161,14 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
                     parts = line.split(":", 2)
                     if len(parts) >= 3:
                         match_path, line_no, content = parts[0], parts[1], parts[2]
-                        try:
-                            rel = Path(match_path).relative_to(root)
-                        except ValueError:
-                            rel = Path(match_path)
+                        p_match = Path(match_path)
+                        if root.is_file():
+                            rel = root.name
+                        else:
+                            try:
+                                rel = p_match.relative_to(root)
+                            except ValueError:
+                                rel = p_match
                         print(f"{rel}:{line_no} | {content.strip()[:120]}")
                     else:
                         print(line[:120])
@@ -1104,7 +1188,15 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20) -> None:
             # Fallback to pure Python search on any rg execution issue
             pass
 
-    pattern = re.compile(query, re.IGNORECASE)
+    if fixed:
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
+    else:
+        try:
+            pattern = re.compile(query, re.IGNORECASE)
+        except re.error:
+            # Auto-fallback to literal string match on invalid regex syntax
+            pattern = re.compile(re.escape(query), re.IGNORECASE)
+
     _grep_python(pattern, root, max_results)
 
 
@@ -2055,8 +2147,13 @@ def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, v
     sys.exit(1)
 
 
-def cmd_batch(steps: Union[str, List[Dict[str, Any]]] = None, stop_on_error: bool = True) -> None:
+def cmd_batch(steps: Union[str, List[Dict[str, Any]]] = None, stop_on_error: bool = True, cwd: Optional[str] = None) -> None:
     """Executes multiple AgentBox actions in a single worker invocation to save agent turns."""
+    if cwd:
+        try:
+            os.chdir(os.path.expanduser(cwd))
+        except Exception:
+            pass
     if steps is None:
         raw_in = read_stdin_utf8().strip()
         if not raw_in:
@@ -2122,27 +2219,44 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     """Dispatches an action name to the corresponding worker command."""
     action = (action or "").replace("-", "_")
     if action == "view":
-        cmd_view(args.get("path"), args.get("start", 1), args.get("end", 100))
+        cmd_view(
+            args.get("path"),
+            int(args.get("start", 1)),
+            int(args.get("end", 100)),
+            tail=int(args["tail"]) if args.get("tail") is not None else None
+        )
     elif action == "outline":
         cmd_outline(args.get("paths") or args.get("path"))
     elif action == "get_fn":
         cmd_get_fn(args.get("path"), args.get("name"))
     elif action == "write":
-        cmd_write(args.get("path"), args.get("content"), args.get("append", False))
+        content = args.get("content")
+        if content is None and args.get("base64"):
+            content = decode_base64_text(args["base64"])
+        cmd_write(args.get("path"), content, args.get("append", False))
     elif action == "patch":
+        old_val = args.get("old")
+        new_val = args.get("new")
+        if old_val is None and args.get("base64_old"):
+            old_val = decode_base64_text(args["base64_old"])
+        if new_val is None and args.get("base64_new"):
+            new_val = decode_base64_text(args["base64_new"])
         cmd_patch(
             args.get("path"),
-            args.get("old"),
-            args.get("new"),
+            old_val,
+            new_val,
             args.get("all", False),
             check_syntax=args.get("check_syntax", True)
         )
     elif action == "patch_lines":
+        content = args.get("content")
+        if content is None and args.get("base64"):
+            content = decode_base64_text(args["base64"])
         cmd_patch_lines(
             args.get("path"),
             int(args.get("start", 1)),
             int(args.get("end", 1)),
-            args.get("content"),
+            content,
             check_syntax=args.get("check_syntax", True)
         )
     elif action == "rollback":
@@ -2150,7 +2264,7 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     elif action == "tree":
         cmd_tree(args.get("path", "."), args.get("depth", 2))
     elif action == "grep":
-        cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20))
+        cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20), fixed=args.get("fixed", False))
     elif action == "run":
         cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"), venv=args.get("venv"))
     elif action == "test":
@@ -2160,7 +2274,10 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     elif action == "stats":
         cmd_stats(clear=args.get("clear", False))
     elif action == "batch":
-        cmd_batch(args.get("steps"), stop_on_error=args.get("stop_on_error", True))
+        steps_val = args.get("steps")
+        if steps_val is None and args.get("base64"):
+            steps_val = decode_base64_text(args["base64"])
+        cmd_batch(steps_val, stop_on_error=args.get("stop_on_error", True), cwd=args.get("cwd"))
     elif action == "spawn":
         cmd_spawn(args.get("cmd"), args.get("cwd"), venv=args.get("venv"))
     elif action == "status":

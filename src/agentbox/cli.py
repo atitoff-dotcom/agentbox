@@ -25,19 +25,35 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+import base64
+
+
+def decode_base64_text(val: str) -> str:
+    """Decodes a base64 string to utf-8 text safely, immune to shell quoting/encoding bugs."""
+    try:
+        raw = base64.b64decode(val.strip())
+        for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8-sig", errors="replace")
+    except Exception as e:
+        print(f"ERROR: Failed to decode base64 input: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 def read_stdin_utf8() -> str:
-    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, and other encodings."""
+    """Reads all content from stdin safely, handling UTF-8 (with or without BOM), Windows CP1251, CP866, and other encodings."""
     try:
         if hasattr(sys.stdin, "buffer"):
             raw_bytes = sys.stdin.buffer.read()
-            try:
-                return raw_bytes.decode("utf-8-sig")
-            except UnicodeDecodeError:
+            for enc in ("utf-8-sig", "utf-8", "cp1251", "cp866"):
                 try:
-                    return raw_bytes.decode("cp1251")
+                    return raw_bytes.decode(enc)
                 except UnicodeDecodeError:
-                    return raw_bytes.decode("utf-8-sig", errors="replace")
+                    continue
+            return raw_bytes.decode("utf-8-sig", errors="replace")
         text = sys.stdin.read()
         return text.lstrip("\ufeff")
     except Exception:
@@ -45,7 +61,6 @@ def read_stdin_utf8() -> str:
             return sys.stdin.read().lstrip("\ufeff")
         except Exception:
             return ""
-
 
 from . import __version__
 from .config import get_config, save_global_config, save_local_config, generate_rules, get_tasks, add_task, remove_task
@@ -151,6 +166,7 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_view.add_argument("path", help="Path to file")
     p_view.add_argument("--start", type=int, default=1, help="Start line (default: 1)")
     p_view.add_argument("--end", type=int, default=100, help="End line (default: 100)")
+    p_view.add_argument("--tail", "-t", type=int, default=None, help="View last N lines of file (overrides start/end)")
 
     # outline
     p_out = sub.add_parser("outline", help="Extract AST outline (classes, functions, methods) for one or more files/dirs")
@@ -165,6 +181,7 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_write = sub.add_parser("write", help="Safely write or append content to file without bash quoting issues")
     p_write.add_argument("path", help="Path to target file")
     p_write.add_argument("--content", default=None, help="File content (reads from stdin if --stdin is specified)")
+    p_write.add_argument("--base64", "-b", dest="b64", default=None, help="File content encoded in UTF-8 base64")
     p_write.add_argument("--stdin", action="store_true", help="Read content from stdin")
     p_write.add_argument("--append", action="store_true", help="Append instead of overwrite")
 
@@ -173,6 +190,8 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_patch.add_argument("path", help="Path to file")
     p_patch.add_argument("--old", default=None, help="Target text to replace")
     p_patch.add_argument("--new", default=None, help="Replacement text")
+    p_patch.add_argument("--base64-old", default=None, help="Target text to replace encoded in UTF-8 base64")
+    p_patch.add_argument("--base64-new", default=None, help="Replacement text encoded in UTF-8 base64")
     p_patch.add_argument("--old-file", default=None, help="Read target text to replace from a local file")
     p_patch.add_argument("--new-file", default=None, help="Read replacement text from a local file")
     p_patch.add_argument("--all", action="store_true", help="Replace all occurrences (default: exactly 1)")
@@ -184,6 +203,7 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     p_pl.add_argument("--start", type=int, required=True, help="Start line (1-indexed, inclusive)")
     p_pl.add_argument("--end", type=int, required=True, help="End line (1-indexed, inclusive)")
     p_pl.add_argument("--content", default=None, help="Replacement text (or pass --stdin)")
+    p_pl.add_argument("--base64", "-b", dest="b64", default=None, help="Replacement text encoded in UTF-8 base64")
     p_pl.add_argument("--stdin", action="store_true", help="Read replacement content from stdin")
     p_pl.add_argument("--no-check", dest="check_syntax", action="store_false", help="Skip Python AST syntax check")
 
@@ -199,7 +219,8 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # grep
     p_grep = sub.add_parser("grep", help="Fast text search with limits")
     p_grep.add_argument("query", help="Search query or regex")
-    p_grep.add_argument("path", nargs="?", default="", help="Directory path")
+    p_grep.add_argument("path", nargs="?", default="", help="Directory path or specific file")
+    p_grep.add_argument("-F", "--fixed", action="store_true", help="Treat query as a fixed string instead of regex")
     p_grep.add_argument("--max", type=int, default=20, help="Max results (default: 20)")
 
     # run
@@ -228,9 +249,9 @@ def create_parser(default_cfg: dict) -> argparse.ArgumentParser:
     # batch
     p_batch = sub.add_parser("batch", help="Execute multiple AgentBox actions in a single call to save agent turns")
     p_batch.add_argument("steps", nargs="?", default=None, help="JSON array of action steps")
+    p_batch.add_argument("--base64", "-b", dest="b64", default=None, help="JSON array of action steps encoded in UTF-8 base64")
     p_batch.add_argument("--stdin", action="store_true", help="Read JSON batch array from stdin")
     p_batch.add_argument("--continue-on-error", dest="stop_on_error", action="store_false", help="Continue executing remaining steps if a step fails")
-
     # mcp
     sub.add_parser("mcp", help="Start built-in Model Context Protocol (MCP) server over stdio")
 
@@ -457,7 +478,10 @@ def main(argv: Optional[List[str]] = None):
         return execute_action(host, cwd, action, act_args)
 
     if args.cmd == "view":
-        code = run_action("view", {"path": args.path, "start": args.start, "end": args.end})
+        act_args = {"path": args.path, "start": args.start, "end": args.end}
+        if getattr(args, "tail", None) is not None:
+            act_args["tail"] = args.tail
+        code = run_action("view", act_args)
     elif args.cmd == "outline":
         code = run_action("outline", {"path": args.path})
     elif args.cmd == "get-fn":
@@ -468,16 +492,22 @@ def main(argv: Optional[List[str]] = None):
         code = run_action("refs", {"name": args.name, "path": args.path or cwd, "max": args.max_results})
     elif args.cmd == "write":
         content = args.content
+        if content is None and getattr(args, "b64", None):
+            content = decode_base64_text(args.b64)
         if content is None:
             if getattr(args, "stdin", False):
                 content = read_stdin_utf8()
             else:
-                print("ERROR: Provide content via --content \"...\" or pass --stdin to read from standard input.", file=sys.stderr)
+                print("ERROR: Provide content via --content \"...\", --base64, or pass --stdin.", file=sys.stderr)
                 return 1
         code = run_action("write", {"path": args.path, "content": content, "append": args.append})
     elif args.cmd == "patch":
         old_val = args.old
         new_val = args.new
+        if old_val is None and getattr(args, "base64_old", None):
+            old_val = decode_base64_text(args.base64_old)
+        if new_val is None and getattr(args, "base64_new", None):
+            new_val = decode_base64_text(args.base64_new)
         if old_val is None and getattr(args, "old_file", None):
             from pathlib import Path as _P
             old_val = _P(args.old_file).read_text(encoding="utf-8")
@@ -485,7 +515,7 @@ def main(argv: Optional[List[str]] = None):
             from pathlib import Path as _P
             new_val = _P(args.new_file).read_text(encoding="utf-8")
         if old_val is None or new_val is None:
-            print("ERROR: Provide --old and --new (or --old-file / --new-file).", file=sys.stderr)
+            print("ERROR: Provide --old and --new (or --base64-old / --base64-new, or --old-file / --new-file).", file=sys.stderr)
             return 1
         code = run_action("patch", {
             "path": args.path,
@@ -496,11 +526,13 @@ def main(argv: Optional[List[str]] = None):
         })
     elif args.cmd == "patch-lines":
         content = args.content
+        if content is None and getattr(args, "b64", None):
+            content = decode_base64_text(args.b64)
         if content is None:
             if getattr(args, "stdin", False):
                 content = read_stdin_utf8()
             else:
-                print("ERROR: Provide replacement via --content \"...\" or pass --stdin.", file=sys.stderr)
+                print("ERROR: Provide replacement via --content \"...\", --base64, or pass --stdin.", file=sys.stderr)
                 return 1
         code = run_action("patch_lines", {
             "path": args.path,
@@ -514,7 +546,7 @@ def main(argv: Optional[List[str]] = None):
     elif args.cmd == "tree":
         code = run_action("tree", {"path": args.path or cwd, "depth": args.depth})
     elif args.cmd == "grep":
-        code = run_action("grep", {"query": args.query, "path": args.path or cwd, "max": args.max})
+        code = run_action("grep", {"query": args.query, "path": args.path or cwd, "max": args.max, "fixed": getattr(args, "fixed", False)})
     elif args.cmd == "run":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:
@@ -537,13 +569,15 @@ def main(argv: Optional[List[str]] = None):
         code = run_action("stats", {"clear": args.clear})
     elif args.cmd == "batch":
         steps_raw = args.steps
+        if steps_raw is None and getattr(args, "b64", None):
+            steps_raw = decode_base64_text(args.b64)
         if steps_raw is None:
             if getattr(args, "stdin", False):
                 steps_raw = read_stdin_utf8()
             else:
-                print("ERROR: Provide JSON steps argument or pass --stdin.", file=sys.stderr)
+                print("ERROR: Provide JSON steps argument, --base64, or pass --stdin.", file=sys.stderr)
                 return 1
-        code = run_action("batch", {"steps": steps_raw, "stop_on_error": getattr(args, "stop_on_error", True)})
+        code = run_action("batch", {"steps": steps_raw, "stop_on_error": getattr(args, "stop_on_error", True), "cwd": cwd})
     elif args.cmd == "spawn":
         cmd_str = _resolve_cmd_string(args.command)
         if not cmd_str:

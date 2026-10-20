@@ -7,12 +7,14 @@ Antigravity, Windsurf, and Roo-Code — eliminating shell quoting errors and CLI
 """
 
 import io
+import os
 import sys
 import json
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
 from . import __version__
-from .config import get_config
+from .config import get_config, find_local_config
 from .client import execute_action
 
 MCP_TOOLS: List[Dict[str, Any]] = [
@@ -77,7 +79,8 @@ MCP_TOOLS: List[Dict[str, Any]] = [
             "properties": {
                 "path": {"type": "string", "description": "Path to file"},
                 "start": {"type": "integer", "description": "Start line (1-indexed, default: 1)"},
-                "end": {"type": "integer", "description": "End line (1-indexed, default: 100)"}
+                "end": {"type": "integer", "description": "End line (1-indexed, default: 100)"},
+                "tail": {"type": "integer", "description": "View last N lines of file (overrides start/end)"}
             },
             "required": ["path"]
         }
@@ -149,12 +152,13 @@ MCP_TOOLS: List[Dict[str, Any]] = [
     },
     {
         "name": "agentbox_grep",
-        "description": "Fast regex/text search across project files with result limits.",
+        "description": "Fast regex/text search across project files or single file with result limits.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query or regex"},
                 "path": {"type": "string", "description": "Directory or file path"},
+                "fixed": {"type": "boolean", "description": "Treat query as exact fixed substring (default: false)"},
                 "max": {"type": "integer", "description": "Max results (default: 20)"}
             },
             "required": ["query"]
@@ -266,6 +270,43 @@ MCP_TOOLS: List[Dict[str, Any]] = [
 ]
 
 
+def _resolve_project_root(args: Dict[str, Any], default_cwd: str = "") -> Optional[Path]:
+    """Finds the local project root containing .agentbox.json from tool args or current directory."""
+    candidates: List[str] = []
+    if args.get("cwd"):
+        candidates.append(str(args["cwd"]))
+    raw_path = args.get("path") or args.get("paths")
+    if isinstance(raw_path, list) and raw_path:
+        candidates.append(str(raw_path[0]))
+    elif isinstance(raw_path, str) and raw_path:
+        candidates.append(raw_path)
+    elif isinstance(args.get("steps"), list):
+        for st in args["steps"]:
+            if isinstance(st, dict) and isinstance(st.get("args"), dict):
+                sp = st["args"].get("cwd") or st["args"].get("path")
+                if isinstance(sp, str) and sp:
+                    candidates.append(sp)
+                    break
+    if default_cwd:
+        candidates.append(default_cwd)
+
+    for cand in candidates:
+        try:
+            p = Path(os.path.expanduser(cand))
+            probe = p if p.is_dir() else p.parent
+            if probe.exists():
+                found = find_local_config(probe)
+                if found:
+                    return found.parent.resolve()
+        except Exception:
+            pass
+
+    found_cwd = find_local_config(Path.cwd())
+    if found_cwd:
+        return found_cwd.parent.resolve()
+    return None
+
+
 def invoke_tool_captured(
     tool_name: str,
     tool_args: Dict[str, Any],
@@ -279,12 +320,53 @@ def invoke_tool_captured(
         action = action[len("agentbox_"):]
 
     args = dict(tool_args or {})
-    host = args.pop("host", default_host)
-    cwd = args.get("cwd") or default_cwd
+
+    # Dynamically discover and load .agentbox.json from the current project directory on every call
+    project_root = _resolve_project_root(args, default_cwd)
+    if project_root and project_root.is_dir():
+        try:
+            os.chdir(project_root)
+        except Exception:
+            pass
+
+    cfg = get_config(start=project_root)
+
+    host = args.pop("host", "") or default_host or cfg.get("host", "")
+    eff_venv = args.get("venv") or default_venv or cfg.get("venv", "")
+    is_remote = bool(host and host not in ("local", "localhost", "127.0.0.1", "."))
+
+    arg_cwd = args.get("cwd")
+    if is_remote:
+        # If caller passed local workspace directory as cwd, use remote cwd from .agentbox.json instead
+        if arg_cwd and project_root:
+            try:
+                if Path(os.path.expanduser(str(arg_cwd))).resolve() == project_root:
+                    arg_cwd = None
+                    args.pop("cwd", None)
+            except Exception:
+                pass
+        cwd = arg_cwd or default_cwd or cfg.get("cwd", "")
+        # Strip local project_root prefix from paths if present so remote paths stay relative to remote cwd
+        if project_root:
+            proj_norm = str(project_root).replace("\\", "/").rstrip("/") + "/"
+            def _strip_local_prefix(val: Any) -> Any:
+                if isinstance(val, str):
+                    v_norm = val.replace("\\", "/")
+                    if v_norm.lower().startswith(proj_norm.lower()):
+                        return v_norm[len(proj_norm):]
+                return val
+            if "path" in args:
+                if isinstance(args["path"], list):
+                    args["path"] = [_strip_local_prefix(x) for x in args["path"]]
+                else:
+                    args["path"] = _strip_local_prefix(args["path"])
+    else:
+        cwd = arg_cwd or default_cwd or cfg.get("cwd", "") or (str(project_root) if project_root else "")
+
     if action in ("run", "test", "pip", "spawn", "graphify_build", "graphify_query"):
-        args.setdefault("cwd", cwd)
-        if default_venv and not args.get("venv"):
-            args["venv"] = default_venv
+        args["cwd"] = cwd
+        if eff_venv and not args.get("venv"):
+            args["venv"] = eff_venv
     elif action in ("tree", "grep", "find_fn", "refs", "git_status", "diff", "git_log"):
         if not args.get("path") and cwd:
             args["path"] = cwd
@@ -383,10 +465,9 @@ def handle_mcp_request(
 
 def run_mcp_server(host: str = "", cwd: str = "", venv: str = "") -> int:
     """Runs the stdio MCP server loop supporting both line-delimited JSON and Content-Length framing."""
-    cfg = get_config()
-    eff_host = host or cfg.get("host", "")
-    eff_cwd = cwd or cfg.get("cwd", "")
-    eff_venv = venv or cfg.get("venv", "")
+    eff_host = host
+    eff_cwd = cwd
+    eff_venv = venv
 
     raw_in = sys.stdin.buffer
     raw_out = sys.stdout.buffer

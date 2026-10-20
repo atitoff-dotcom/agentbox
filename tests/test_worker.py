@@ -33,13 +33,14 @@ class TestWorker(unittest.TestCase):
         # Patch
         worker.cmd_patch(str(sample), "return 42", "return 100")
         self.assertIn("return 100", sample.read_text(encoding="utf-8"))
-        self.assertTrue(sample.with_suffix(".py.bak").is_file())
+        bak = worker._get_backup_path(sample)
+        self.assertTrue(bak.is_file())
+        self.assertFalse(sample.with_suffix(".py.bak").is_file())
 
         # Rollback
         worker.cmd_rollback(str(sample))
         self.assertIn("return 42", sample.read_text(encoding="utf-8"))
-        self.assertFalse(sample.with_suffix(".py.bak").is_file())
-
+        self.assertFalse(bak.is_file())
     def test_patch_duplicate_error(self):
         sample = self.dir_path / "dup.txt"
         sample.write_text("foo\nfoo\n", encoding="utf-8")
