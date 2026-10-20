@@ -4,7 +4,10 @@
 > **CLI-ONLY EXECUTION PROTOCOL:**
 > You MUST use `agentbox` CLI commands for ALL project code analysis, navigation, file editing, searches, and test executions.
 > Direct raw execution of `cat`, `grep`, `find`, streaming test runners, or raw file redirections in PowerShell / bash is STRICTLY PROHIBITED.
-
+>
+> **🏠 ZERO-CONFIG LOCAL-FIRST GUARANTEE:**
+> If there is NO `.agentbox.json` file in the project, `agentbox` runs **100% locally** in the current directory.
+> No configuration is needed for local work. Remote SSH is activated ONLY when a local `.agentbox.json` (or explicit `--host`) is present.
 ---
 
 ### 🚫 STRICTLY BANNED RAW COMMANDS:

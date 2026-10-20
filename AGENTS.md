@@ -2,8 +2,11 @@
 
 > [!IMPORTANT]
 > To eliminate token waste and prevent shell syntax errors, you MUST use `agentbox` for all remote (SSH) and project code operations.
-> Direct raw execution of `cat`, `grep`, `find`, or streaming test runners over SSH is STRICTLY PROHIBITED.
-
+> Direct raw execution of `cat`, `grep`, `find`, or streaming test runners is STRICTLY PROHIBITED.
+>
+> **🏠 ZERO-CONFIG LOCAL-FIRST GUARANTEE:**
+> If there is NO `.agentbox.json` file in the project, `agentbox` automatically runs **100% locally** right in the current directory with zero configuration needed.
+> Remote SSH execution is activated ONLY when a local `.agentbox.json` (or explicit `--host`) is present.
 ### 🚫 STRICTLY BANNED COMMANDS:
 1. DO NOT read entire files: never use `cat <file>` or download full 200+ line files -> USE `agentbox outline <file>` or `agentbox view <file>`.
 2. DO NOT search files using raw find/grep: never use `find .` or raw `grep` -> USE `agentbox tree`, `agentbox refs <symbol>`, or `agentbox grep "<query>"`.

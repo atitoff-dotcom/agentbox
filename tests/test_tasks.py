@@ -192,10 +192,26 @@ class TestTasks(unittest.TestCase):
         self.assertIn("agentbox task db", cursor_content)
 
         # Remove task
+        # Remove task
         config.remove_task("db")
         updated_agents = agents_file.read_text(encoding="utf-8")
         self.assertNotIn("agentbox task db", updated_agents)
 
+    def test_no_local_config_runs_locally(self):
+        # Even if global config sets a host, missing local .agentbox.json forces local mode
+        config.GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        config.GLOBAL_CONFIG_FILE.write_text(json.dumps({"host": "remote@host", "cwd": "/remote/path"}), encoding="utf-8")
+
+        # Without local .agentbox.json
+        cfg = config.get_config()
+        self.assertEqual(cfg["host"], "")
+        self.assertEqual(cfg["cwd"], "")
+
+        # But with local .agentbox.json
+        Path(".agentbox.json").write_text(json.dumps({"host": "localuser@box", "cwd": "/local/path"}), encoding="utf-8")
+        cfg_with_local = config.get_config()
+        self.assertEqual(cfg_with_local["host"], "localuser@box")
+        self.assertEqual(cfg_with_local["cwd"], "/local/path")
 
 if __name__ == "__main__":
     unittest.main()

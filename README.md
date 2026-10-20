@@ -52,10 +52,23 @@ pip install ai-agentbox
 ```
 
 ---
+## 🏠 Zero-Config Local Work
+
+If there is **no `.agentbox.json`** in your project, AgentBox automatically runs **100% locally** in the current directory.
+No setup, no SSH connection, and no configuration required:
+
+```bash
+# Works out of the box in any local directory:
+agentbox outline src/app.py
+agentbox view src/app.py --tail 50
+agentbox patch-lines src/app.py --start 10 --end 15 --content "    return True\n"
+agentbox test "pytest tests/"
+```
+Remote SSH execution is activated ONLY when you bind a remote host with `agentbox config --set-host ...` (which saves `.agentbox.json`).
+
+---
 
 ## 🛠️ Quickstart: 3-Step Setup for Any Remote Project
-
-Follow this simple flow when starting a local workspace to work on an existing remote Linux server:
 
 ### Step 1: Install `ai-agentbox` locally
 ```bash

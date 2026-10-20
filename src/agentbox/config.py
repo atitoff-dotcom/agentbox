@@ -63,6 +63,10 @@ def get_config(start: Optional[Path] = None) -> Dict[str, Any]:
             cfg.update(json.loads(local_path.read_text(encoding="utf-8")))
         except Exception:
             pass
+    else:
+        # Zero-config Local First: without .agentbox.json, everything runs 100% locally
+        cfg["host"] = ""
+        cfg["cwd"] = ""
 
     return cfg
 
