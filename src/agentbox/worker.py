@@ -17,6 +17,10 @@ import shutil
 import base64
 import subprocess
 import argparse
+import io
+import fnmatch
+import hashlib
+import tarfile
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List, Union
 
@@ -71,6 +75,25 @@ def read_stdin_utf8() -> str:
             return sys.stdin.read().lstrip("\ufeff")
         except Exception:
             return ""
+
+
+def parse_file_mapping(spec: str) -> Tuple[str, str]:
+    r"""
+    Parses a 'source[:destination]' mapping spec.
+    Handles Windows drive letters (e.g. C:\... or C:/...) on both source and destination without false splits.
+    If no destination is specified, destination defaults to source.
+    """
+    start_search = 0
+    if len(spec) >= 2 and spec[0].isalpha() and spec[1] == ":" and (len(spec) == 2 or spec[2] in "\\/"):
+        start_search = 2
+
+    sep_idx = spec.find(":", start_search)
+    if sep_idx == -1:
+        return spec, spec
+
+    src = spec[:sep_idx]
+    dest = spec[sep_idx + 1:]
+    return src, dest or src
 
 
 DEFAULT_IGNORED_DIRS = {
@@ -538,14 +561,20 @@ def cmd_outline(path: Union[str, List[str]]) -> None:
     _record_token_stat("outline", total_raw, total_out, ",".join(str(x) for x in paths))
 
 
-def cmd_get_fn(path: str, name: str) -> None:
+def cmd_get_fn(path: str, name: Union[str, List[str]]) -> None:
     """
-    Extracts exact function, method, or class definition.
+    Extracts exact function, method, or class definition(s).
     Supports qualified `ClassName.method_name` lookups and decorator inclusion.
+    Accepts a single name or a list of names.
     """
     p = to_path(path)
     if not p.is_file():
         print(f"ERROR: File not found: {path}", file=sys.stderr)
+        sys.exit(1)
+
+    target_names = [name] if isinstance(name, str) else list(name)
+    if not target_names:
+        print(f"ERROR: No function or class names provided", file=sys.stderr)
         sys.exit(1)
 
     ext = p.suffix.lower()
@@ -556,19 +585,27 @@ def cmd_get_fn(path: str, name: str) -> None:
         print(f"ERROR: Failed to read {path}: {e}", file=sys.stderr)
         sys.exit(1)
 
+    tree = None
     if ext == ".py":
         try:
             tree = ast.parse(content, filename=str(p))
-            matches: List[Tuple[str, int, int]] = []
+        except Exception:
+            tree = None
 
-            def _node_span(n: ast.AST) -> Tuple[int, int]:
-                decs = getattr(n, "decorator_list", None) or []
-                start_line = min([n.lineno] + [d.lineno for d in decs if hasattr(d, "lineno")])
-                end_line = getattr(n, "end_lineno", n.lineno)
-                return start_line, end_line
+    def _node_span(n: ast.AST) -> Tuple[int, int]:
+        decs = getattr(n, "decorator_list", None) or []
+        start_line = min([n.lineno] + [d.lineno for d in decs if hasattr(d, "lineno")])
+        end_line = getattr(n, "end_lineno", n.lineno)
+        return start_line, end_line
 
-            if "." in name:
-                parts = name.split(".")
+    found_sections: List[str] = []
+    missing_names: List[str] = []
+
+    for target in target_names:
+        matches: List[Tuple[str, int, int]] = []
+        if tree is not None:
+            if "." in target:
+                parts = target.split(".")
                 curr_nodes = list(tree.body)
                 qual_prefix = []
                 for idx_part, part in enumerate(parts):
@@ -587,12 +624,11 @@ def cmd_get_fn(path: str, name: str) -> None:
                     else:
                         curr_nodes = list(getattr(found_next, "body", []))
             else:
-                # Top-level and class methods matching `name`
                 def _walk_scope(body_nodes, scope_prefix=""):
                     for n in body_nodes:
                         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                             qual = f"{scope_prefix}.{n.name}" if scope_prefix else n.name
-                            if n.name == name:
+                            if n.name == target:
                                 s, e = _node_span(n)
                                 matches.append((qual, s, e))
                             if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -600,40 +636,51 @@ def cmd_get_fn(path: str, name: str) -> None:
 
                 _walk_scope(tree.body)
 
-            if matches:
-                out_lines: List[str] = []
-                for idx_m, (qual_name, s, e) in enumerate(matches):
-                    if idx_m > 0:
-                        out_lines.append("")
-                    out_lines.append(f"[{p.name}: {qual_name} lines {s}-{e}]")
-                    for i in range(s, e + 1):
-                        out_lines.append(f"{i:4d} | {lines[i - 1]}")
-                output = "\n".join(out_lines)
-                print(output)
-                _record_token_stat("get_fn", len(content), len(output), f"{p.name}:{name}")
-                return
-        except Exception:
-            pass
+        if matches:
+            out_lines: List[str] = []
+            for idx_m, (qual_name, s, e) in enumerate(matches):
+                if idx_m > 0:
+                    out_lines.append("")
+                out_lines.append(f"[{p.name}: {qual_name} lines {s}-{e}]")
+                for i in range(s, e + 1):
+                    out_lines.append(f"{i:4d} | {lines[i - 1]}")
+            found_sections.append("\n".join(out_lines))
+            continue
 
-    # Generic search with brace-balanced block extraction for Rust, TS, JS, Go, C/C++
-    short_name = name.split(".")[-1]
-    patterns = [
-        re.compile(rf"\b(def|fn|function|class|struct|enum|trait|interface|type|func)\b[^\n]*?\b{re.escape(short_name)}\b"),
-        re.compile(rf"^\s*(?:export\s+)?(?:const|let|var)\s+{re.escape(short_name)}\s*="),
-        re.compile(rf"^\s*(?:pub\s+)?(?:async\s+)?{re.escape(short_name)}\s*\([^;]*\)\s*(?::\s*[^{{]+)?\{{"),
-    ]
-    for idx, line in enumerate(lines, start=1):
-        if any(rx.search(line) for rx in patterns):
-            end_ln = _find_brace_block_end(lines, idx)
-            out_lines = [f"[{p.name}: {name} lines {idx}-{end_ln}]"]
-            for j in range(idx, min(len(lines) + 1, end_ln + 1)):
-                out_lines.append(f"{j:4d} | {lines[j - 1]}")
-            output = "\n".join(out_lines)
-            print(output)
-            _record_token_stat("get_fn", len(content), len(output), f"{p.name}:{name}")
-            return
+        # Generic search with brace-balanced block extraction for Rust, TS, JS, Go, C/C++
+        short_name = target.split(".")[-1]
+        patterns = [
+            re.compile(rf"\b(def|fn|function|class|struct|enum|trait|interface|type|func)\b[^\n]*?\b{re.escape(short_name)}\b"),
+            re.compile(rf"^\s*(?:export\s+)?(?:const|let|var)\s+{re.escape(short_name)}\s*="),
+            re.compile(rf"^\s*(?:pub\s+)?(?:async\s+)?{re.escape(short_name)}\s*\([^;]*\)\s*(?::\s*[^{{]+)?\{{"),
+        ]
+        generic_found = False
+        for idx, line in enumerate(lines, start=1):
+            if any(rx.search(line) for rx in patterns):
+                end_ln = _find_brace_block_end(lines, idx)
+                out_lines = [f"[{p.name}: {target} lines {idx}-{end_ln}]"]
+                for j in range(idx, min(len(lines) + 1, end_ln + 1)):
+                    out_lines.append(f"{j:4d} | {lines[j - 1]}")
+                found_sections.append("\n".join(out_lines))
+                generic_found = True
+                break
 
-    print(f"ERROR: Function or class '{name}' not found in {p.name}", file=sys.stderr)
+        if not generic_found:
+            missing_names.append(target)
+
+    if found_sections:
+        output = "\n\n".join(found_sections)
+        print(output)
+        _record_token_stat("get_fn", len(content), len(output), f"{p.name}:{','.join(target_names)}")
+        if missing_names:
+            for m in missing_names:
+                print(f"WARNING: Function or class '{m}' not found in {p.name}", file=sys.stderr)
+        return
+
+    if len(target_names) == 1:
+        print(f"ERROR: Function or class '{target_names[0]}' not found in {p.name}", file=sys.stderr)
+    else:
+        print(f"ERROR: None of the requested functions/classes ({', '.join(target_names)}) were found in {p.name}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -836,27 +883,46 @@ def cmd_refs(name: str, path: str = ".", max_results: int = 40) -> None:
         print(f"  {rel_path}:{lineno:<4d} | [{kind:<7s}] {snippet}")
 
 
-def _validate_python_syntax(path: Path, old_content: str, new_content: str) -> Optional[str]:
+def _validate_syntax(path: Path, old_content: str, new_content: str) -> Optional[str]:
     """
-    If `path` is a .py file that previously parsed cleanly (or did not exist),
-    checks if `new_content` has valid Python AST syntax.
+    If `path` is a supported file (.py, .json) that previously parsed cleanly (or did not exist),
+    checks if `new_content` has valid syntax.
     Returns None if valid, or a formatted SyntaxError description if broken.
     """
-    if path.suffix.lower() != ".py":
-        return None
-    if old_content:
+    ext = path.suffix.lower()
+    if ext == ".py":
+        if old_content:
+            try:
+                ast.parse(old_content, filename=str(path))
+            except SyntaxError:
+                # Original file already had syntax errors; allow patching to fix it
+                return None
         try:
-            ast.parse(old_content, filename=str(path))
-        except SyntaxError:
-            # Original file already had syntax errors; allow patching to fix it
+            ast.parse(new_content, filename=str(path))
             return None
-    try:
-        ast.parse(new_content, filename=str(path))
-        return None
-    except SyntaxError as se:
-        err_line = se.text.strip() if se.text else ""
-        return f"Line {se.lineno}: {se.msg}" + (f" -> `{err_line}`" if err_line else "")
+        except SyntaxError as se:
+            err_line = se.text.strip() if se.text else ""
+            return f"Line {se.lineno}: {se.msg}" + (f" -> `{err_line}`" if err_line else "")
 
+    elif ext == ".json":
+        if old_content:
+            try:
+                json.loads(old_content)
+            except Exception:
+                # Original file already had JSON syntax errors; allow patching to fix it
+                return None
+        try:
+            json.loads(new_content)
+            return None
+        except json.JSONDecodeError as jde:
+            return f"Line {jde.lineno} col {jde.colno}: {jde.msg}"
+        except Exception as e:
+            return str(e)
+
+    return None
+
+
+_validate_python_syntax = _validate_syntax
 
 def cmd_patch(
     path: str,
@@ -922,10 +988,11 @@ def cmd_patch(
 
     # Validate Python AST syntax before committing
     if check_syntax:
-        syntax_err = _validate_python_syntax(p, norm_content, new_norm_content)
+        syntax_err = _validate_syntax(p, norm_content, new_norm_content)
         if syntax_err:
+            kind = "Python SyntaxError" if p.suffix.lower() == ".py" else ("JSON SyntaxError" if p.suffix.lower() == ".json" else "SyntaxError")
             print(
-                f"ERROR: Patch rejected — introduced Python SyntaxError in {p.name} ({syntax_err}). File was NOT modified.",
+                f"ERROR: Patch rejected — introduced {kind} in {p.name} ({syntax_err}). File was NOT modified.",
                 file=sys.stderr
             )
             sys.exit(1)
@@ -941,7 +1008,7 @@ def cmd_patch(
     final_content = new_norm_content.replace("\n", file_newline) if file_newline == "\r\n" else new_norm_content
     p.write_bytes(final_content.encode("utf-8"))
 
-    print(f"OK: Replaced {count if replace_all else 1} occurrence(s) in {p.name}. Backup: {bak_path.name}")
+    print("OK")
 
 
 def cmd_patch_lines(
@@ -988,10 +1055,11 @@ def cmd_patch_lines(
     new_norm_text = "\n".join(new_lines)
 
     if check_syntax:
-        syntax_err = _validate_python_syntax(p, norm_orig, new_norm_text)
+        syntax_err = _validate_syntax(p, norm_orig, new_norm_text)
         if syntax_err:
+            kind = "Python SyntaxError" if p.suffix.lower() == ".py" else ("JSON SyntaxError" if p.suffix.lower() == ".json" else "SyntaxError")
             print(
-                f"ERROR: Line patch rejected — introduced Python SyntaxError in {p.name} ({syntax_err}). File was NOT modified.",
+                f"ERROR: Line patch rejected — introduced {kind} in {p.name} ({syntax_err}). File was NOT modified.",
                 file=sys.stderr
             )
             sys.exit(1)
@@ -1006,7 +1074,7 @@ def cmd_patch_lines(
 
     final_content = new_norm_text.replace("\n", file_newline) if file_newline == "\r\n" else new_norm_text
     p.write_bytes(final_content.encode("utf-8"))
-    print(f"OK: Replaced lines {start}-{end_clamped} ({end_clamped - start + 1} -> {len(rep_lines)} lines) in {p.name}. Backup: {bak_path.name}")
+    print("OK")
 
 
 def cmd_rollback(path: str) -> None:
@@ -1027,7 +1095,7 @@ def cmd_rollback(path: str) -> None:
         bak_path.unlink()
     except Exception:
         pass
-    print(f"OK: Restored {p.name} from backup and removed backup.")
+    print("OK")
 
 
 def cmd_write(path: str, content: str = None, append: bool = False) -> None:
@@ -1041,11 +1109,46 @@ def cmd_write(path: str, content: str = None, append: bool = False) -> None:
     try:
         with open(p, mode, encoding="utf-8", newline="") as f:
             f.write(content)
-        action_word = "Appended to" if append else "Wrote"
-        print(f"OK: {action_word} {p.name} ({len(content)} chars, {len(content.splitlines())} lines).")
+        print("OK")
     except Exception as e:
         print(f"ERROR: Failed writing to {path}: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def cmd_write_files(files: List[Dict[str, Any]], append: bool = False) -> None:
+    """Safely writes multiple files in a single invocation."""
+    if not files:
+        print("OK (0 files written)")
+        return
+
+    mode = "a" if append else "w"
+    written_count = 0
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        target_path = item.get("path")
+        if not target_path:
+            continue
+        content = item.get("content")
+        if content is None and item.get("base64"):
+            content = decode_base64_text(item["base64"])
+        if content is None:
+            content = ""
+
+        p = to_path(target_path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, mode, encoding="utf-8", newline="") as f:
+                f.write(content)
+            written_count += 1
+        except Exception as e:
+            print(f"ERROR: Failed writing to {target_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    if written_count == 1:
+        print("OK")
+    else:
+        print(f"OK ({written_count} files written)")
 
 
 def cmd_tree(path: str = ".", max_depth: int = 2) -> None:
@@ -1078,12 +1181,15 @@ def cmd_tree(path: str = ".", max_depth: int = 2) -> None:
             print(f"{sub_indent}... and {len(visible_files) - 15} more files")
 
 
-def _grep_file(pattern: re.Pattern, fpath: Path, display_path: Union[str, Path], max_results: int) -> int:
+def _grep_file(pattern: re.Pattern, fpath: Path, display_path: Union[str, Path], max_results: int, files_only: bool = False) -> int:
     count = 0
     try:
         with open(fpath, "r", encoding="utf-8", errors="ignore") as fh:
             for idx, line in enumerate(fh, start=1):
                 if pattern.search(line):
+                    if files_only:
+                        print(str(display_path))
+                        return 1
                     print(f"{display_path}:{idx} | {line.strip()[:120]}")
                     count += 1
                     if count >= max_results:
@@ -1093,10 +1199,10 @@ def _grep_file(pattern: re.Pattern, fpath: Path, display_path: Union[str, Path],
     return count
 
 
-def _grep_python(pattern: re.Pattern, root: Path, max_results: int) -> None:
+def _grep_python(pattern: re.Pattern, root: Path, max_results: int, files_only: bool = False) -> None:
     if root.is_file():
-        count = _grep_file(pattern, root, root.name, max_results)
-        if count >= max_results:
+        count = _grep_file(pattern, root, root.name, max_results, files_only=files_only)
+        if count >= max_results and not files_only:
             print(f"... [stopped at max {max_results} results]")
         return
 
@@ -1111,13 +1217,14 @@ def _grep_python(pattern: re.Pattern, root: Path, max_results: int) -> None:
                 rel = fpath.relative_to(root)
             except ValueError:
                 rel = fpath
-            count += _grep_file(pattern, fpath, rel, max_results - count)
+            count += _grep_file(pattern, fpath, rel, max_results - count, files_only=files_only)
             if count >= max_results:
-                print(f"... [stopped at max {max_results} results]")
+                if not files_only:
+                    print(f"... [stopped at max {max_results} results]")
                 return
 
 
-def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = False) -> None:
+def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = False, files_only: bool = False) -> None:
     root = to_path(path)
     if not root.exists():
         print(f"ERROR: Path not found: {path}", file=sys.stderr)
@@ -1129,11 +1236,14 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = F
         rg_cmd = [
             rg_bin,
             "-i",
-            "--line-number",
             "--no-heading",
             "--color", "never",
             f"--max-count={max_results}",
         ]
+        if files_only:
+            rg_cmd.append("-l")
+        else:
+            rg_cmd.append("--line-number")
         if fixed:
             rg_cmd.append("-F")
         if root.is_dir():
@@ -1157,11 +1267,8 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = F
                     line = line.rstrip("\r\n")
                     if not line:
                         continue
-                    # format: /abs/path:line:content or rel/path:line:content
-                    parts = line.split(":", 2)
-                    if len(parts) >= 3:
-                        match_path, line_no, content = parts[0], parts[1], parts[2]
-                        p_match = Path(match_path)
+                    if files_only:
+                        p_match = Path(line)
                         if root.is_file():
                             rel = root.name
                         else:
@@ -1169,13 +1276,28 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = F
                                 rel = p_match.relative_to(root)
                             except ValueError:
                                 rel = p_match
-                        print(f"{rel}:{line_no} | {content.strip()[:120]}")
+                        print(str(rel))
                     else:
-                        print(line[:120])
+                        # format: /abs/path:line:content or rel/path:line:content
+                        parts = line.split(":", 2)
+                        if len(parts) >= 3:
+                            match_path, line_no, content = parts[0], parts[1], parts[2]
+                            p_match = Path(match_path)
+                            if root.is_file():
+                                rel = root.name
+                            else:
+                                try:
+                                    rel = p_match.relative_to(root)
+                                except ValueError:
+                                    rel = p_match
+                            print(f"{rel}:{line_no} | {content.strip()[:120]}")
+                        else:
+                            print(line[:120])
 
                     count += 1
                     if count >= max_results:
-                        print(f"... [stopped at max {max_results} results]")
+                        if not files_only:
+                            print(f"... [stopped at max {max_results} results]")
                         proc.terminate()
                         try:
                             proc.wait(timeout=0.5)
@@ -1197,8 +1319,7 @@ def cmd_grep(query: str, path: str = ".", max_results: int = 20, fixed: bool = F
             # Auto-fallback to literal string match on invalid regex syntax
             pattern = re.compile(re.escape(query), re.IGNORECASE)
 
-    _grep_python(pattern, root, max_results)
-
+    _grep_python(pattern, root, max_results, files_only=files_only)
 
 def cmd_git_status(path: str = ".") -> None:
     """Compact git status showing only modified/untracked files with +/- diff count."""
@@ -1429,7 +1550,7 @@ def _record_execution_stat(
         pass
 
 
-def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv: str = None) -> None:
+def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv: str = None, head: int = None, silent: bool = False) -> None:
     log_dir = _get_log_dir()
     task_id = f"task_{int(time.time() * 1000) % 1000000}"
     log_file = log_dir / f"{task_id}.log"
@@ -1440,13 +1561,22 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
     v_label = _venv_label(venv_dir)
     start_time = time.time()
 
+    temp_script = None
+    if sys.platform == "win32" and "\n" in exec_cmd:
+        temp_script = log_dir / f"{task_id}.cmd"
+        with open(temp_script, "w", encoding="utf-8") as sf:
+            sf.write(f"@echo off\r\n{exec_cmd}\r\n")
+        exec_target = f'"{temp_script}"'
+    else:
+        exec_target = exec_cmd
+
     with open(log_file, "w", encoding="utf-8") as out:
         venv_note = f" (venv: {v_label})" if v_label else ""
         out.write(f"=== Command: {exec_cmd}{venv_note}\n=== CWD: {work_dir}\n=== Started: {time.ctime(start_time)}\n\n")
         out.flush()
         try:
             proc = subprocess.Popen(
-                exec_cmd,
+                exec_target,
                 shell=True,
                 cwd=str(work_dir),
                 env=env,
@@ -1463,14 +1593,25 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
             proc.kill()
             ret_code = -1
             out.write("\n=== ERROR: Timeout expired\n")
-
+        finally:
+            if temp_script and temp_script.exists():
+                try:
+                    temp_script.unlink()
+                except Exception:
+                    pass
     duration = time.time() - start_time
     dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
 
     with open(log_file, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.readlines()
+        all_lines = f.readlines()
 
-    raw_len = sum(len(l) for l in lines)
+    # Filter out initial agentbox execution metadata header lines for slice display
+    if len(all_lines) >= 4 and all_lines[0].startswith("=== Command:") and all_lines[3].strip() == "":
+        lines = all_lines[4:]
+    else:
+        lines = all_lines
+
+    raw_len = sum(len(l) for l in all_lines)
     tail_lines = lines[-tail:] if len(lines) > tail else lines
     tail_str = "".join(tail_lines).strip()
 
@@ -1478,11 +1619,25 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
     if ret_code == 0:
         header = f"OK [exit 0, {dur_str}]{v_tag} Log: {log_file}"
         print(header)
-        out_len = len(header)
-        if tail > 0 and len(lines) > 3:
-            print(f"--- Tail ({len(tail_lines)} lines) ---")
-            print(tail_str)
-            out_len += len(tail_str) + 30
+        if silent or tail == 0:
+            out_len = len(header)
+        elif len(lines) <= 15:
+            # Smart auto-inline for short output (e.g. git status, versions, short scripts)
+            if lines:
+                print("".join(lines).rstrip())
+            out_len = len(header) + raw_len
+        elif head is not None and head > 0:
+            slice_lines = lines[:head]
+            print(f"--- Output Head ({len(slice_lines)} of {len(lines)} lines) ---")
+            print("".join(slice_lines).rstrip())
+            out_len = len(header) + sum(len(l) for l in slice_lines) + 40
+        elif tail > 0:
+            slice_lines = lines[-tail:]
+            print(f"--- Output Tail ({len(slice_lines)} of {len(lines)} lines) ---")
+            print("".join(slice_lines).rstrip())
+            out_len = len(header) + sum(len(l) for l in slice_lines) + 40
+        else:
+            out_len = len(header)
         _record_execution_stat("run", cmd, str(work_dir), ret_code, duration, v_label or None, raw_len, out_len)
     else:
         header = f"FAILED [exit {ret_code}, {dur_str}]{v_tag} Log: {log_file}"
@@ -1491,6 +1646,107 @@ def cmd_run(cmd: str, cwd: str = None, tail: int = 15, timeout: int = None, venv
         print(tail_str)
         out_len = len(header) + len(tail_str) + 35
         _record_execution_stat("run", cmd, str(work_dir), ret_code, duration, v_label or None, raw_len, out_len)
+        sys.exit(ret_code)
+        sys.exit(ret_code)
+
+
+def cmd_py(code: str, cwd: str = None, script_args: Optional[List[str]] = None, tail: int = 30, max_lines: int = 30, timeout: Optional[int] = None, venv: Optional[str] = None) -> None:
+    """Silent Python evaluator: zero-escaping stdin execution, venv auto-detection, token protection."""
+    log_dir = _get_log_dir()
+    task_id = f"py_{int(time.time() * 1000) % 1000000}"
+    log_file = log_dir / f"{task_id}.log"
+
+    work_dir = to_path(cwd)
+    env, venv_dir = prepare_env_for_cmd(work_dir, venv)
+    py_exe = str(_get_venv_python(venv_dir) if venv_dir else sys.executable)
+    v_label = _venv_label(venv_dir)
+    start_time = time.time()
+
+    extra_args = script_args or []
+    exec_target = [py_exe, "-", *extra_args]
+
+    ret_code = 0
+    stdout_str = ""
+    stderr_str = ""
+    try:
+        proc = subprocess.Popen(
+            exec_target,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(work_dir),
+            env=env,
+            **win_no_window_kwargs()
+        )
+        stdout_str, stderr_str = proc.communicate(input=code, timeout=timeout)
+        ret_code = proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        ret_code = -1
+        try:
+            stdout_str, stderr_str = proc.communicate()
+        except Exception:
+            pass
+        stderr_str += "\n=== ERROR: Python execution timeout expired\n"
+
+    duration = time.time() - start_time
+    dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        venv_note = f" (venv: {v_label})" if v_label else ""
+        args_str = f" {' '.join(extra_args)}" if extra_args else ""
+        f.write(f"=== Python Eval: {py_exe} -{args_str}{venv_note}\n=== CWD: {work_dir}\n=== Started: {time.ctime(start_time)}\n\n")
+        f.write("=== CODE ===\n")
+        f.write(code)
+        f.write("\n\n=== STDOUT ===\n")
+        f.write(stdout_str)
+        f.write("\n\n=== STDERR ===\n")
+        f.write(stderr_str)
+        f.write(f"\n\n=== Exit Code: {ret_code} ===\n")
+
+    raw_len = len(code) + len(stdout_str) + len(stderr_str)
+    v_tag = f" [{v_label}]" if v_label else ""
+
+    if ret_code == 0:
+        out_lines = stdout_str.splitlines(keepends=True)
+        if not out_lines:
+            header = f"OK [exit 0, {dur_str}]{v_tag} Log: {log_file}"
+            print(header)
+            out_len = len(header)
+        elif len(out_lines) <= max_lines:
+            header = f"OK [exit 0, {dur_str}]{v_tag}"
+            print(header)
+            print("".join(out_lines).rstrip())
+            out_len = len(header) + len(stdout_str)
+        else:
+            tail_lines = out_lines[-tail:] if len(out_lines) > tail else out_lines
+            header = f"OK [exit 0, {dur_str}]{v_tag} (output truncated: showing last {len(tail_lines)} of {len(out_lines)} lines, full log: {log_file})"
+            print(header)
+            print("--- Output Tail ---")
+            print("".join(tail_lines).rstrip())
+            out_len = len(header) + sum(len(l) for l in tail_lines) + 30
+        _record_execution_stat("py", code[:50], str(work_dir), ret_code, duration, v_label or None, raw_len, out_len)
+    else:
+        err_lines = (stderr_str if stderr_str else stdout_str).splitlines(keepends=True)
+        tb_lines = []
+        in_tb = False
+        for line in err_lines:
+            if "Traceback (most recent call last):" in line:
+                in_tb = True
+            if in_tb:
+                tb_lines.append(line)
+        if not tb_lines:
+            tb_lines = err_lines[-max_lines:] if len(err_lines) > max_lines else err_lines
+
+        header = f"FAILED [exit {ret_code}, {dur_str}]{v_tag} Log: {log_file}"
+        print(header)
+        print("--- High-Signal Failure Traceback ---")
+        print("".join(tb_lines).strip())
+        out_len = len(header) + sum(len(l) for l in tb_lines) + 40
+        _record_execution_stat("py", code[:50], str(work_dir), ret_code, duration, v_label or None, raw_len, out_len)
         sys.exit(ret_code)
 
 
@@ -1663,13 +1919,22 @@ def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30
     v_label = _venv_label(venv_dir)
     start_time = time.time()
 
+    temp_script = None
+    if sys.platform == "win32" and "\n" in exec_cmd:
+        temp_script = log_dir / f"{task_id}.cmd"
+        with open(temp_script, "w", encoding="utf-8") as sf:
+            sf.write(f"@echo off\r\n{exec_cmd}\r\n")
+        exec_target = f'"{temp_script}"'
+    else:
+        exec_target = exec_cmd
+
     with open(log_file, "w", encoding="utf-8") as out:
         venv_note = f" (venv: {v_label})" if v_label else ""
         out.write(f"=== Test Command: {exec_cmd}{venv_note}\n=== CWD: {work_dir}\n=== Started: {time.ctime(start_time)}\n\n")
         out.flush()
         try:
             proc = subprocess.Popen(
-                exec_cmd,
+                exec_target,
                 shell=True,
                 cwd=str(work_dir),
                 env=env,
@@ -1686,7 +1951,12 @@ def cmd_test(cmd: str, cwd: str = None, timeout: int = None, max_lines: int = 30
             proc.kill()
             ret_code = -1
             out.write("\n=== ERROR: Test timeout expired\n")
-
+        finally:
+            if temp_script and temp_script.exists():
+                try:
+                    temp_script.unlink()
+                except Exception:
+                    pass
     duration = time.time() - start_time
     dur_str = f"{duration:.2f}s" if duration < 60 else f"{int(duration // 60)}m {int(duration % 60)}s"
 
@@ -2060,8 +2330,12 @@ def cmd_graphify_build(path: str = ".", deep: bool = False, venv: str = None) ->
 
     dur = time.time() - start_time
     if proc.returncode != 0:
-        print(f"FAILED: Graphify build failed [exit {proc.returncode}, {dur:.1f}s]. Log: {log_file}", file=sys.stderr)
-        sys.exit(proc.returncode)
+        # Fallback to code-only AST extraction (requires no LLM API key)
+        fallback_cmd = [py, "-m", "graphify", "update", str(p)]
+        proc = subprocess.run(fallback_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=str(p), **win_no_window_kwargs())
+        if proc.returncode != 0:
+            print(f"FAILED: Graphify build failed [exit {proc.returncode}, {dur:.1f}s]. Log: {log_file}", file=sys.stderr)
+            sys.exit(proc.returncode)
 
     # Check graph.json / GRAPH_REPORT.md
     out_dir = p / "graphify-out"
@@ -2080,16 +2354,17 @@ def cmd_graphify_build(path: str = ".", deep: bool = False, venv: str = None) ->
 
 
 def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, venv: str = None) -> None:
-    """Queries an existing graphify knowledge graph without blowing LLM context."""
+    """Queries an existing graphify knowledge graph without blowing LLM context (auto-builds if needed)."""
     p = to_path(path)
     out_dir = p / "graphify-out"
     graph_file = out_dir / "graph.json"
     report_file = out_dir / "GRAPH_REPORT.md"
 
     if not graph_file.is_file() and not report_file.is_file():
-        print(f"ERROR: No knowledge graph found in {p}. Run 'agentbox graphify build' first.", file=sys.stderr)
-        sys.exit(1)
-
+        cmd_graphify_build(path=str(p), venv=venv)
+        if not graph_file.is_file() and not report_file.is_file():
+            print(f"ERROR: No knowledge graph found in {p}. Build could not complete.", file=sys.stderr)
+            sys.exit(1)
     py = _find_graphify_python(p, venv) or sys.executable
     # Try native graphify query CLI
     proc = subprocess.run([py, "-m", "graphify", "query", question], capture_output=True, text=True, cwd=str(p), **win_no_window_kwargs())
@@ -2145,6 +2420,60 @@ def cmd_graphify_query(question: str, path: str = ".", max_tokens: int = 1500, v
 
     print(f"ERROR: Query could not be processed for: {question}", file=sys.stderr)
     sys.exit(1)
+
+
+def cmd_graphify_export_html(path: str = ".", venv: str = None) -> None:
+    """Exports graph.html content as base64 for client-side visualization (auto-builds if missing)."""
+    p = to_path(path)
+    if p.is_file() and p.name.endswith(".html"):
+        html_file = p
+    else:
+        html_file = p / "graphify-out" / "graph.html"
+
+    if not html_file.is_file():
+        cmd_graphify_build(path=str(p), venv=venv)
+        if not html_file.is_file():
+            print(f"ERROR: No graph.html found at {html_file}. Please run 'agentbox graphify-build' first.", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        data = html_file.read_bytes()
+        b64 = base64.b64encode(data).decode("ascii")
+        print(b64)
+    except Exception as e:
+        print(f"ERROR: Failed reading {html_file}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_graphify_open(path: str = ".", venv: str = None, no_open: bool = False, out: str = None) -> None:
+    """Locates graph.html, optionally copies to destination, and opens in browser."""
+    p = to_path(path)
+    if p.is_file() and p.name.endswith(".html"):
+        html_file = p
+    else:
+        html_file = p / "graphify-out" / "graph.html"
+
+    if not html_file.is_file():
+        cmd_graphify_build(path=str(p), venv=venv)
+        if not html_file.is_file():
+            print(f"ERROR: No graph.html found at {html_file}. Please run 'agentbox graphify-build' first.", file=sys.stderr)
+            sys.exit(1)
+
+    dest_file = html_file
+    if out:
+        dest_p = to_path(out)
+        dest_p.parent.mkdir(parents=True, exist_ok=True)
+        dest_p.write_bytes(html_file.read_bytes())
+        dest_file = dest_p
+
+    print(f"Knowledge graph: {dest_file}")
+    if not no_open:
+        try:
+            import webbrowser
+            webbrowser.open(dest_file.resolve().as_uri())
+            print(f"OK: Opened {dest_file} in browser.")
+        except Exception as e:
+            print(f"Notice: Could not launch browser ({e}). View file at: {dest_file}")
 
 
 def cmd_batch(steps: Union[str, List[Dict[str, Any]]] = None, stop_on_error: bool = True, cwd: Optional[str] = None) -> None:
@@ -2215,6 +2544,278 @@ def cmd_batch(steps: Union[str, List[Dict[str, Any]]] = None, stop_on_error: boo
         sys.exit(had_error)
 
 
+
+# ---------------------------------------------------------------------------
+# Bidirectional Project Sync Engine (In-Memory Tar Transport)
+# ---------------------------------------------------------------------------
+
+ALWAYS_IGNORE = [
+    ".git",
+    ".git/*",
+    "*venv*",
+    ".*venv*",
+    "venv",
+    "venv/*",
+    "__pycache__",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache",
+    ".pytest_cache/*",
+    ".agentbox",
+    ".agentbox/*",
+    "node_modules",
+    "node_modules/*",
+    ".idea",
+    ".idea/*",
+    ".vscode",
+    ".vscode/*",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.egg-info",
+    "*.egg-info/*",
+    "dist",
+    "dist/*",
+    "build",
+    "build/*"
+]
+
+
+def parse_gitignore(root_dir: Path) -> List[str]:
+    """Parses local .gitignore file if present and returns cleaned pattern list."""
+    gitignore_file = root_dir / ".gitignore"
+    if not gitignore_file.is_file():
+        return []
+    patterns: List[str] = []
+    try:
+        content = gitignore_file.read_text(encoding="utf-8", errors="replace")
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith("/"):
+                line = line[:-1]
+            patterns.append(line)
+    except Exception:
+        pass
+    return patterns
+
+
+def should_ignore(rel_path: str, is_dir: bool = False, extra_patterns: Optional[List[str]] = None) -> bool:
+    """Checks whether a relative path matches ALWAYS_IGNORE or gitignore patterns."""
+    norm = rel_path.replace("\\", "/").strip("/")
+    parts = norm.split("/")
+
+    for ign in ALWAYS_IGNORE:
+        ign_clean = ign.replace("\\", "/").rstrip("/*")
+        for p in parts:
+            if fnmatch.fnmatch(p.lower(), ign_clean.lower()):
+                return True
+        if fnmatch.fnmatch(norm.lower(), ign.lower()):
+            return True
+
+    if extra_patterns:
+        for pat in extra_patterns:
+            pat_clean = pat.replace("\\", "/").strip("/")
+            if "/" not in pat_clean:
+                for p in parts:
+                    if fnmatch.fnmatch(p, pat_clean):
+                        return True
+            else:
+                if fnmatch.fnmatch(norm, pat_clean) or fnmatch.fnmatch(norm, f"{pat_clean}/*"):
+                    return True
+
+    return False
+
+
+def hash_file_sha256(file_path: Path) -> str:
+    """Computes SHA-256 hash of a file in 64KB blocks."""
+    h = hashlib.sha256()
+    try:
+        with open(file_path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def build_manifest(root_dir: Path) -> Dict[str, Dict[str, Any]]:
+    """
+    Builds a dictionary manifest of all synchronized files in root_dir.
+    Keys are relative POSIX paths; values include size, mtime, and sha256.
+    """
+    manifest: Dict[str, Dict[str, Any]] = {}
+    gitignore_patterns = parse_gitignore(root_dir)
+
+    for root, dirs, files in os.walk(str(root_dir)):
+        rel_root = os.path.relpath(root, str(root_dir))
+        if rel_root == ".":
+            rel_root = ""
+
+        dirs[:] = [
+            d for d in dirs
+            if not should_ignore(
+                f"{rel_root}/{d}" if rel_root else d,
+                is_dir=True,
+                extra_patterns=gitignore_patterns
+            )
+        ]
+
+        for fname in files:
+            rel_path = f"{rel_root}/{fname}".replace("\\", "/").lstrip("/")
+            if should_ignore(rel_path, is_dir=False, extra_patterns=gitignore_patterns):
+                continue
+
+            full_p = Path(root) / fname
+            try:
+                st = full_p.stat()
+                manifest[rel_path] = {
+                    "size": st.st_size,
+                    "mtime": round(st.st_mtime, 2),
+                    "sha256": hash_file_sha256(full_p)
+                }
+            except Exception:
+                continue
+
+    return manifest
+
+
+def is_text_content(data: bytes) -> bool:
+    """Heuristic to detect if file content is text vs binary (checks for null bytes)."""
+    if not data:
+        return True
+    if b"\x00" in data[:8192]:
+        return False
+    try:
+        data[:8192].decode("utf-8")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+def pack_sync_tar(root_dir: Path, rel_paths: List[str], to_lf: bool = False) -> bytes:
+    """Packs specified relative file paths from root_dir into an in-memory gzipped tarball."""
+    bio = io.BytesIO()
+    with tarfile.open(mode="w:gz", fileobj=bio) as tar:
+        for rel in sorted(rel_paths):
+            full_path = root_dir / rel
+            if not full_path.is_file():
+                continue
+            try:
+                data = full_path.read_bytes()
+                if to_lf and is_text_content(data):
+                    data = data.replace(b"\r\n", b"\n")
+
+                ti = tarfile.TarInfo(name=rel.replace("\\", "/"))
+                ti.size = len(data)
+                try:
+                    ti.mtime = full_path.stat().st_mtime
+                except Exception:
+                    ti.mtime = 0
+                ti.mode = 0o644
+                tar.addfile(ti, io.BytesIO(data))
+            except Exception:
+                continue
+    return bio.getvalue()
+
+
+def unpack_sync_tar(root_dir: Path, tar_bytes: bytes) -> List[str]:
+    """Safely unpacks in-memory gzipped tarball into root_dir, preventing directory traversal."""
+    bio = io.BytesIO(tar_bytes)
+    unpacked: List[str] = []
+    with tarfile.open(mode="r:gz", fileobj=bio) as tar:
+        for member in tar.getmembers():
+            norm_name = os.path.normpath(member.name).replace("\\", "/")
+            if norm_name.startswith("..") or os.path.isabs(norm_name):
+                continue
+
+            target_path = root_dir / norm_name
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+
+            f = tar.extractfile(member)
+            if f:
+                content = f.read()
+                target_path.write_bytes(content)
+                unpacked.append(norm_name)
+    return unpacked
+
+
+def compute_sync_diff(
+    local_manifest: Dict[str, Dict[str, Any]],
+    remote_manifest: Dict[str, Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Computes bidirectional synchronization delta and detects potential conflicts."""
+    to_push: List[str] = []
+    to_pull: List[str] = []
+    conflicts_push: List[str] = []
+    conflicts_pull: List[str] = []
+    in_sync: List[str] = []
+
+    all_keys = sorted(set(local_manifest.keys()) | set(remote_manifest.keys()))
+
+    for key in all_keys:
+        loc = local_manifest.get(key)
+        rem = remote_manifest.get(key)
+
+        if loc and not rem:
+            to_push.append(key)
+        elif rem and not loc:
+            to_pull.append(key)
+        elif loc and rem:
+            if loc["sha256"] == rem["sha256"]:
+                in_sync.append(key)
+            else:
+                if rem["mtime"] > loc["mtime"]:
+                    conflicts_push.append(key)
+                else:
+                    conflicts_pull.append(key)
+                to_push.append(key)
+                to_pull.append(key)
+
+    return {
+        "to_push": to_push,
+        "to_pull": to_pull,
+        "conflicts_push": conflicts_push,
+        "conflicts_pull": conflicts_pull,
+        "in_sync": in_sync,
+        "remote_only": [k for k in all_keys if k not in local_manifest],
+        "local_only": [k for k in all_keys if k not in remote_manifest],
+    }
+
+
+def cmd_file_read_b64(path: str) -> None:
+    """Reads file content and prints it as base64 encoded binary data."""
+    p = to_path(path)
+    if not p.is_file():
+        if p.is_dir():
+            print(f"ERROR: Source path is a directory (directories not supported in cp v1): {path}", file=sys.stderr)
+        else:
+            print(f"ERROR: Source file not found: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        data = p.read_bytes()
+        print(base64.b64encode(data).decode("ascii"))
+    except Exception as e:
+        print(f"ERROR: Failed reading file {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_file_write_b64(path: str, data_b64: str, src_filename: Optional[str] = None) -> None:
+    """Writes base64 encoded binary data to target path."""
+    p = to_path(path)
+    if p.is_dir() or str(path).endswith("/") or str(path).endswith("\\"):
+        fname = src_filename or "file"
+        p = p / fname
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        data = base64.b64decode(data_b64)
+        p.write_bytes(data)
+        print("OK")
+    except Exception as e:
+        print(f"ERROR: Failed writing file {path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     """Dispatches an action name to the corresponding worker command."""
     action = (action or "").replace("-", "_")
@@ -2228,12 +2829,17 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     elif action == "outline":
         cmd_outline(args.get("paths") or args.get("path"))
     elif action == "get_fn":
-        cmd_get_fn(args.get("path"), args.get("name"))
-    elif action == "write":
-        content = args.get("content")
-        if content is None and args.get("base64"):
-            content = decode_base64_text(args["base64"])
-        cmd_write(args.get("path"), content, args.get("append", False))
+        cmd_get_fn(args.get("path"), args.get("names") or args.get("name"))
+    elif action in ("write", "write_files"):
+        if args.get("files"):
+            cmd_write_files(args.get("files"), args.get("append", False))
+        else:
+            content = args.get("content")
+            if content is None and args.get("base64"):
+                content = decode_base64_text(args["base64"])
+            if content is None and (args.get("file") or args.get("file_path")):
+                content = to_path(args.get("file") or args.get("file_path")).read_text(encoding="utf-8")
+            cmd_write(args.get("path"), content, args.get("append", False))
     elif action == "patch":
         old_val = args.get("old")
         new_val = args.get("new")
@@ -2241,6 +2847,10 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
             old_val = decode_base64_text(args["base64_old"])
         if new_val is None and args.get("base64_new"):
             new_val = decode_base64_text(args["base64_new"])
+        if old_val is None and (args.get("old_file") or args.get("old_file_path")):
+            old_val = to_path(args.get("old_file") or args.get("old_file_path")).read_text(encoding="utf-8")
+        if new_val is None and (args.get("new_file") or args.get("new_file_path")):
+            new_val = to_path(args.get("new_file") or args.get("new_file_path")).read_text(encoding="utf-8")
         cmd_patch(
             args.get("path"),
             old_val,
@@ -2252,6 +2862,8 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
         content = args.get("content")
         if content is None and args.get("base64"):
             content = decode_base64_text(args["base64"])
+        if content is None and (args.get("file") or args.get("file_path")):
+            content = to_path(args.get("file") or args.get("file_path")).read_text(encoding="utf-8")
         cmd_patch_lines(
             args.get("path"),
             int(args.get("start", 1)),
@@ -2264,9 +2876,11 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
     elif action == "tree":
         cmd_tree(args.get("path", "."), args.get("depth", 2))
     elif action == "grep":
-        cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20), fixed=args.get("fixed", False))
+        cmd_grep(args.get("query"), args.get("path", "."), args.get("max", 20), fixed=args.get("fixed", False), files_only=args.get("files_only", False))
     elif action == "run":
-        cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"), venv=args.get("venv"))
+        cmd_run(args.get("cmd"), args.get("cwd"), args.get("tail", 15), args.get("timeout"), venv=args.get("venv"), head=args.get("head"), silent=args.get("silent", False))
+    elif action == "py":
+        cmd_py(args.get("code", ""), args.get("cwd"), args.get("args"), tail=args.get("tail", 30), max_lines=args.get("max_lines", 30), timeout=args.get("timeout"), venv=args.get("venv"))
     elif action == "test":
         cmd_test(args.get("cmd"), args.get("cwd"), args.get("timeout"), args.get("max_lines", 30), venv=args.get("venv"))
     elif action == "pip":
@@ -2292,6 +2906,10 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
         cmd_graphify_build(args.get("path", "."), args.get("deep", False), venv=args.get("venv"))
     elif action == "graphify_query":
         cmd_graphify_query(args.get("question"), args.get("path", "."), args.get("max_tokens", 1500), venv=args.get("venv"))
+    elif action == "graphify_export_html":
+        cmd_graphify_export_html(args.get("path", "."), venv=args.get("venv"))
+    elif action == "graphify_open":
+        cmd_graphify_open(args.get("path", "."), venv=args.get("venv"), no_open=args.get("no_open", False), out=args.get("out"))
     elif action == "git_status":
         cmd_git_status(args.get("path", "."))
     elif action == "diff":
@@ -2306,6 +2924,38 @@ def dispatch_action(action: str, args: Dict[str, Any]) -> None:
         cmd_find_fn(args.get("name"), args.get("path", "."), args.get("exact", False), args.get("max", 30))
     elif action == "refs":
         cmd_refs(args.get("name"), args.get("path", "."), args.get("max", 40))
+    elif action == "sync_manifest":
+        work_dir = to_path(args.get("cwd") or ".")
+        manifest = build_manifest(work_dir)
+        print(json.dumps(manifest, ensure_ascii=False))
+    elif action == "sync_pack":
+        work_dir = to_path(args.get("cwd") or ".")
+        files = args.get("files", [])
+        to_lf = args.get("to_lf", False)
+        tar_bytes = pack_sync_tar(work_dir, files, to_lf=to_lf)
+        print(base64.b64encode(tar_bytes).decode("ascii"))
+    elif action == "sync_unpack":
+        work_dir = to_path(args.get("cwd") or ".")
+        tar_b64 = args.get("tar_b64", "")
+        unpacked = unpack_sync_tar(work_dir, base64.b64decode(tar_b64))
+        print(json.dumps({"unpacked": unpacked}, ensure_ascii=False))
+    elif action == "sync_delete":
+        work_dir = to_path(args.get("cwd") or ".")
+        files = args.get("files", [])
+        deleted = []
+        for f in files:
+            p = work_dir / f
+            if p.is_file():
+                try:
+                    p.unlink()
+                    deleted.append(f)
+                except Exception:
+                    pass
+        print(json.dumps({"deleted": deleted}, ensure_ascii=False))
+    elif action in ("file_read_b64", "cp_read"):
+        cmd_file_read_b64(args.get("path", ""))
+    elif action in ("file_write_b64", "cp_write"):
+        cmd_file_write_b64(args.get("path", ""), args.get("data_b64", ""), args.get("src_filename"))
     else:
         print(f"ERROR: Unknown action '{action}'", file=sys.stderr)
         sys.exit(1)
@@ -2449,11 +3099,12 @@ def main():
 
     p_fn = sub.add_parser("get-fn")
     p_fn.add_argument("path")
-    p_fn.add_argument("name")
+    p_fn.add_argument("name", nargs="+")
 
     p_write = sub.add_parser("write")
-    p_write.add_argument("path")
+    p_write.add_argument("path", nargs="+")
     p_write.add_argument("--content", default=None)
+    p_write.add_argument("--file", default=None)
     p_write.add_argument("--append", action="store_true")
 
     p_patch = sub.add_parser("patch")
@@ -2468,8 +3119,8 @@ def main():
     p_pl.add_argument("--start", type=int, required=True)
     p_pl.add_argument("--end", type=int, required=True)
     p_pl.add_argument("--content", default=None)
+    p_pl.add_argument("--file", default=None)
     p_pl.add_argument("--no-check", dest="check_syntax", action="store_false")
-
     p_rb = sub.add_parser("rollback")
     p_rb.add_argument("path")
 
@@ -2481,6 +3132,8 @@ def main():
     p_grep.add_argument("query")
     p_grep.add_argument("path", nargs="?", default=".")
     p_grep.add_argument("--max", type=int, default=20)
+    p_grep.add_argument("-F", "--fixed", action="store_true")
+    p_grep.add_argument("-l", "--files-only", action="store_true")
 
     p_run = sub.add_parser("run")
     p_run.add_argument("command")
@@ -2538,6 +3191,12 @@ def main():
     p_g_query.add_argument("--venv", default=None)
     p_g_query.add_argument("--max-tokens", type=int, default=1500)
 
+    p_g_open = sub.add_parser("graphify-open")
+    p_g_open.add_argument("path", nargs="?", default=".")
+    p_g_open.add_argument("--venv", default=None)
+    p_g_open.add_argument("--no-open", action="store_true")
+    p_g_open.add_argument("--out", default=None)
+
     # git-status
     p_gs = sub.add_parser("git-status")
     p_gs.add_argument("path", nargs="?", default=".")
@@ -2593,17 +3252,44 @@ def main():
     elif args.cmd == "refs":
         cmd_refs(args.name, args.path, args.max_results)
     elif args.cmd == "write":
-        cmd_write(args.path, args.content, args.append)
+        paths = args.path if isinstance(args.path, list) else [args.path]
+        content = args.content
+        if content is None and getattr(args, "file", None):
+            content = to_path(args.file).read_text(encoding="utf-8")
+        if content is not None:
+            if len(paths) == 1:
+                cmd_write(paths[0], content, args.append)
+            else:
+                cmd_write_files([{"path": p, "content": content} for p in paths], args.append)
+        else:
+            files_list = []
+            for item in paths:
+                src, dest = parse_file_mapping(item)
+                src_p = to_path(src)
+                if not src_p.is_file():
+                    if len(paths) == 1 and ":" not in item:
+                        cmd_write(paths[0], None, args.append)
+                        return
+                    print(f"ERROR: Local source file not found: {src}", file=sys.stderr)
+                    sys.exit(1)
+                files_list.append({"path": dest, "content": src_p.read_text(encoding="utf-8")})
+            if len(files_list) == 1 and ":" not in paths[0]:
+                cmd_write(files_list[0]["path"], files_list[0]["content"], args.append)
+            else:
+                cmd_write_files(files_list, args.append)
     elif args.cmd == "patch":
         cmd_patch(args.path, args.old, args.new, args.all, check_syntax=args.check_syntax)
     elif args.cmd == "patch-lines":
-        cmd_patch_lines(args.path, args.start, args.end, args.content, check_syntax=args.check_syntax)
+        content = args.content
+        if content is None and getattr(args, "file", None):
+            content = to_path(args.file).read_text(encoding="utf-8")
+        cmd_patch_lines(args.path, args.start, args.end, content, check_syntax=args.check_syntax)
     elif args.cmd == "rollback":
         cmd_rollback(args.path)
     elif args.cmd == "tree":
         cmd_tree(args.path, args.depth)
     elif args.cmd == "grep":
-        cmd_grep(args.query, args.path, args.max)
+        cmd_grep(args.query, args.path, args.max, fixed=getattr(args, "fixed", False), files_only=getattr(args, "files_only", False))
     elif args.cmd == "run":
         cmd_run(args.command, args.cwd, args.tail, args.timeout, venv=args.venv)
     elif args.cmd == "test":
@@ -2628,6 +3314,8 @@ def main():
         cmd_graphify_build(args.path, args.deep, venv=args.venv)
     elif args.cmd == "graphify-query":
         cmd_graphify_query(args.question, args.path, args.max_tokens, venv=args.venv)
+    elif args.cmd == "graphify-open":
+        cmd_graphify_open(args.path, venv=args.venv, no_open=args.no_open, out=args.out)
     elif args.cmd == "git-status":
         cmd_git_status(args.path)
     elif args.cmd == "diff":

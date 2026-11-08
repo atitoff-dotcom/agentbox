@@ -114,6 +114,36 @@ class TestWorker(unittest.TestCase):
         # Query should match and execute without errors
         worker.cmd_graphify_query("AuthModule", path=str(self.dir_path))
 
+    def test_graphify_export_html_mock(self):
+        out_dir = self.dir_path / "graphify-out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        html_content = "<html><body><h1>Mock Knowledge Graph</h1></body></html>"
+        (out_dir / "graph.html").write_text(html_content, encoding="utf-8")
+
+        import io
+        import base64
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            worker.cmd_graphify_export_html(path=str(self.dir_path))
+            out_val = sys.stdout.getvalue().strip()
+        finally:
+            sys.stdout = old_stdout
+
+        decoded = base64.b64decode(out_val).decode("utf-8")
+        self.assertEqual(decoded, html_content)
+
+    def test_graphify_open_mock(self):
+        out_dir = self.dir_path / "graphify-out"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        html_content = "<html><body><h1>Interactive Visualization</h1></body></html>"
+        (out_dir / "graph.html").write_text(html_content, encoding="utf-8")
+
+        custom_out = self.dir_path / "exported_graph.html"
+        worker.cmd_graphify_open(path=str(self.dir_path), no_open=True, out=str(custom_out))
+        self.assertTrue(custom_out.is_file())
+        self.assertEqual(custom_out.read_text(encoding="utf-8"), html_content)
+
     def test_venv_auto_detect_cwd(self):
         venv_dir = self.dir_path / ".venv"
         (venv_dir / "bin").mkdir(parents=True)
@@ -178,7 +208,7 @@ class TestConfig(unittest.TestCase):
                 self.assertIn("MANDATORY PROTOCOL", content)
                 self.assertIn("agentbox", content)
                 self.assertIn("agentbox task", content)
-                self.assertIn("Task Auto-Memoization", content)
+                self.assertIn("Verified Project Recipes", content)
             finally:
                 os.chdir(orig)
 

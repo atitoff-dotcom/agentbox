@@ -5,24 +5,17 @@
 [![Python: 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#zero-dependencies)
 
-**Ultra-lean, token-efficient remote execution, AST outlining, and safe atomic patching proxy for AI coding agents.**
+**Ultra-lean, token-efficient execution, AST outlining, and safe atomic patching proxy for AI coding agents.**
 
 Designed for LLM agents (**Claude Code, Cursor, Antigravity, Aider, Roo-Code, Windsurf**) working on remote servers or local machines.
 
 ---
 
-## 🎯 The Problem
+## ⚡ The Problem & The Solution
 
-When AI coding assistants work over SSH or terminal sessions, they burn massive token budgets on:
-1. **Dumping entire files** (hundreds of lines of code just to locate one function).
-2. **Intermediate noise from long commands** (`cargo build`, `pytest`, `docker build` streaming lines every second and triggering unnecessary agent turns).
-3. **Broken shell quoting** (escaping nested quotes `\"` and `'` in bash over SSH leads to repeated syntax errors and retry loops).
+AI coding assistants burn **thousands of wasted tokens** reading full files, streaming noisy build logs (`pytest`, `cargo`, `docker`), and failing on shell quote escaping over SSH.
 
----
-
-## ⚡ The Solution: AgentBox
-
-AgentBox provides a **Client $\leftrightarrow$ Worker** architecture that reduces token consumption by **80% to 95%**:
+AgentBox cuts token consumption by **80% to 95%**:
 
 | Task | Standard AI Agent over SSH | With AgentBox | Token Savings |
 |---|:---:|:---:|:---:|
@@ -34,418 +27,120 @@ AgentBox provides a **Client $\leftrightarrow$ Worker** architecture that reduce
 
 ---
 
-## 🚀 Key Features
+## 🚀 Quickstart: Setup in 60 Seconds
 
-* **Zero External Dependencies**: Built entirely on the Python 3 standard library.
-* **Self-Bootstrapping Worker**: When targeting a remote SSH server, AgentBox automatically verifies, hashes, and deploys its standalone worker in milliseconds.
-* **Silent Task Runner**: Suppresses intermediate stdout noise, streams to a local log file, and returns only execution time, exit code, and failure tail.
-* **Background Process Manager**: Detached process spawning (`spawn`, `status`, `logs`, `kill`) that survives SSH disconnections.
-* **AST-Powered Skeletons**: Extracts class and function signatures for Python, Rust, JavaScript, TypeScript, C/C++, and Go.
-* **Escape-Proof Atomic Patching**: Sends replacement payloads over stdin IPC streams, eliminating bash quote escaping bugs forever.
+You do not need to memorize or run low-level commands manually. Setup takes 2 simple steps: **configure your project and targets**, then **generate agent instructions**. Your AI assistant handles the rest!
 
----
-
-## 📦 Installation
-
+### 1. Install `ai-agentbox`
 ```bash
 pip install ai-agentbox
 ```
 
----
-## 🏠 Zero-Config Local Work
+### 2. Configure `.agentbox.json`
+Create `.agentbox.json` in your project root to define execution targets (local or remote SSH) and verified project task recipes.
 
-If there is **no `.agentbox.json`** in your project, AgentBox automatically runs **100% locally** in the current directory.
-No setup, no SSH connection, and no configuration required:
-
-```bash
-# Works out of the box in any local directory:
-agentbox outline src/app.py
-agentbox view src/app.py --tail 50
-agentbox patch-lines src/app.py --start 10 --end 15 --content "    return True\n"
-agentbox test "pytest tests/"
-```
-Remote SSH execution is activated ONLY when you bind a remote host with `agentbox config --set-host ...` (which saves `.agentbox.json`).
-
----
-
-## 🛠️ Quickstart: 3-Step Setup for Any Remote Project
-
-### Step 1: Install `ai-agentbox` locally
-```bash
-pip install ai-agentbox
-```
-
-### Step 2: Bind Remote Server & Generate AI Rules
-Run these two commands in your local project root:
-```bash
-# 1. Bind target SSH host, remote project path, and optional virtualenv:
-agentbox config --set-host user@remote-server --set-cwd /home/user/my_project
-# Optional: explicitly set virtualenv path (otherwise .venv/venv is auto-detected!)
-agentbox config --set-venv /home/user/my_project/.venv
-
-# 2. Automatically generate strict anti-token-waste rules for your AI agent:
-agentbox init-rules
-```
-*`init-rules` creates `.cursorrules`, `AGENTS.md`, and `CLAUDE.md`, strictly prohibiting the AI agent from using raw `cat`/`grep`/`pytest` over SSH and forcing `agentbox`.*
-
-### Step 3: Let AI Agent Work (Zero Setup on Remote Server!)
-Give any task to your AI assistant (**Cursor, Claude Code, Antigravity, Windsurf, Roo-Code**).
-
-When the agent executes any `agentbox` command (e.g. `agentbox tree` or `agentbox outline`):
-* AgentBox **automatically connects via SSH** to your Linux server.
-* Checks if `~/.agentbox_worker.py` exists and matches SHA-256 hash.
-* **Auto-deploys the zero-dependency worker to the server in milliseconds**.
-* You **never** have to log in to the remote server or install anything there manually!
-
----
-
-## 📖 Command Reference
-
-### 1. Code Navigation & Skeletons
-
-#### `agentbox outline <file>`
-Extracts only class, function, and method signatures with line numbers:
-```bash
-agentbox outline src/gateway.py
-```
-*Output:*
-```text
-=== OUTLINE: gateway.py (350 lines) ===
-  12-  45 | class GatewayConfig:
-  48- 110 | async def handle_connection(reader, writer) -> bool
- 115- 180 | def commit_flash_block(offset: int) -> None
-```
-
-#### `agentbox get-fn <file> <function_name>`
-Extracts the exact definition and body of a target function:
-```bash
-agentbox get-fn src/gateway.py handle_connection
-```
-
-#### `agentbox find-fn <name> [path] [--exact]`
-Recursively scans project AST to locate where a function or class is declared without noisy grep output:
-```bash
-agentbox find-fn get_bank
-# Or exact match:
-agentbox find-fn Bank --exact
-```
-*Output:*
-```text
-=== FOUND SYMBOLS: 'Bank' (2 matches) ===
-  app/bank/models.py:11   | class Bank(Base)
-  archive/app/bank/models.py:13   | class Bank(BasicSecureModel)
-```
-
-#### `agentbox view <file> [--start N --end M] [--tail N]`
-Displays an exact line slice with 1-indexed line numbers (supports `--tail N` or negative `--start -N`):
-```bash
-# Slice specific lines:
-agentbox view src/gateway.py --start 48 --end 65
-
-# View last 50 lines of logs or files in 1 step:
-agentbox view logs/app.log --tail 50
-```
----
-
-### 2. Silent & Background Process Runner
-
-#### `agentbox run "<command>" [--tail N] [--timeout T]`
-Silently executes a command, redirects all stdout/stderr to a log file, and returns only the final verdict:
-```bash
-agentbox run "cargo build --release"
-```
-*Output on success:*
-```text
-OK [exit 0, 42.15s] Log: /tmp/agent_logs/task_123456.log
-```
-*Output on failure (automatically prints tail):*
-```text
-FAILED [exit 1, 12.30s] Log: /tmp/agent_logs/task_123456.log
---- Failure Tail (5 lines) ---
-error[E0308]: mismatched types
-  --> src/main.rs:42:15
-   |
-42 |     let x: u8 = val;
-   |                 ^^^ expected `u8`, found `u16`
-```
-
-#### `agentbox test "<test_command>" [--venv <path>]`
-Token-optimized test & type runner that suppresses passing tests and noise, extracting only high-signal failure tracebacks.
-Supports **Python** (`pytest`, `unittest`), **Rust** (`cargo test`), and **Frontend** (`svelte-check`, `tsc`, `eslint`, `vitest`, `pnpm check`).
-
-> [!TIP]
-> **Frontend & Svelte 5 / TypeScript Support**: Running `agentbox test "pnpm check"` or `agentbox test "pnpm svelte-check"` automatically strips noisy compilation banners and stylistic warnings, highlighting only real type errors, file locations, and failure code snippets!
-
-> [!TIP]
-> **Automatic Virtualenv Detection**: AgentBox automatically checks for `.venv` or `venv` in your working directory and parent project directories, prefixing `PATH="$VENV/bin:$PATH"` so tools like `pytest` and `granian` work instantly without full paths! You can also pass `--venv /path/to/venv` or set it in config (`agentbox config --set-venv /path`).
-
-```bash
-# Automatically finds .venv / venv:
-agentbox test "pytest tests/"
-
-# Or with explicit virtualenv:
-agentbox test "pytest tests/" --venv /home/alex/pl3_2/.venv
-```
-*Output on success:*
-```text
-OK [tests passed in 1.45s] (12 passed) Log: /tmp/agent_logs/test_491823.log
-```
-*Output on failure (extracts traceback, saving up to 95% tokens):*
-```text
-FAILED [exit 1, 1.82s] Log: /tmp/agent_logs/test_491823.log
---- High-Signal Failure Traceback ---
->   assert result == 42
-E   AssertionError: assert 100 == 42
-tests/test_calc.py:15: AssertionError
-```
-
-#### `agentbox spawn "<command>"`
-Spawns a detached background task that survives SSH disconnects:
-```bash
-agentbox spawn "python3 train_model.py"
-# Output: SPAWNED: task_id=bg_849201 pid=4215 log=/tmp/agent_logs/bg_849201.log
-
-agentbox status bg_849201
-# Output: TASK: bg_849201 | Status: RUNNING | PID: 4215 | Runtime: 1m 24s
-
-agentbox logs bg_849201 -n 20
-# Output: displays last 20 lines of log
-
-agentbox logs bg_849201 -f
-# Output: live real-time log streaming (tail -f)
-
-agentbox kill bg_849201
-# Output: OK: Task bg_849201 (PID 4215) terminated.
-```
-
----
-
-### 3. File Operations & Safe Atomic Patching
-
-#### `agentbox patch-lines <file> --start N --end M [--content "..." | --base64 <b64> | --stdin]`
-**The primary and safest way to edit code.** Replaces line range `[N..M]` with automatic AST syntax validation and auto-backup stored cleanly in `.agentbox/backups/`:
-```bash
-# Direct replacement:
-agentbox patch-lines src/main.py --start 10 --end 15 --content "    return True\n"
-
-# Immune to PowerShell / SSH quoting & Cyrillic encoding bugs via Base64:
-agentbox patch-lines src/main.py --start 10 --end 15 --base64 <b64_string>
-```
-
-#### `agentbox write <file> [--content "..."] [--base64 <b64>] [--stdin] [--append]`
-Safely creates or appends to a file without shell quote escaping issues:
-```bash
-agentbox write src/settings.py --content 'DEBUG = True\nPORT = 8080'
-# Or via pipeline:
-cat config.json | agentbox write config.json --stdin
-```
-
-#### `agentbox patch <file> --old "<exact_code>" --new "<replacement>"`
-Safely replaces code block with automatic backup in `.agentbox/backups/` and Python AST validation:
-```bash
-agentbox patch src/config.py --old 'PORT = 8000' --new 'PORT = 9000'
-```
-
-#### `agentbox rollback <file>`
-Restores file from `.agentbox/backups/` keeping the Git working tree clean:
-```bash
-agentbox rollback src/config.py
-# Output: OK: Restored config.py from backup and removed backup.
-```
-
-#### `agentbox batch '<json_steps>'` / `agentbox batch --base64 <b64>`
-Executes multiple AgentBox actions (view, patch-lines, test, etc.) in a single turn to save LLM turns:
-```bash
-agentbox batch '[{"action": "view", "path": "src/app.py", "start": 1, "end": 20}, {"action": "patch_lines", "path": "src/app.py", "start": 5, "end": 7, "content": "    pass\n"}]'
-```
-
----
-
-### 4. Search & Directory Tree
-
-#### `agentbox tree [path] [--depth N]`
-Prints clean directory structure while automatically ignoring `.git`, `node_modules`, `target`, `__pycache__`, `.venv`, and build artifacts:
-```bash
-agentbox tree --depth 2
-```
-
-#### `agentbox grep "<query>" [path_or_file] [-F] [--max N]`
-Fast token-limited search across directories **OR a single file** (regex or `-F` exact fixed substring):
-```bash
-# Search directory:
-agentbox grep "handle_packet" src/ --max 10
-
-# Search single file with exact match (-F):
-agentbox grep "tasks.list" src/App.svelte -F
-```
-
-### 5. Knowledge Graph & Architecture (`graphify`)
-
-AgentBox integrates with `graphifyy` to build and navigate deep code knowledge graphs without blowing LLM context budgets:
-
-#### `agentbox graphify-install [--upgrade]`
-Silently ensures `graphifyy` is installed on the local machine or remote SSH server:
-```bash
-agentbox graphify-install
-```
-
-#### `agentbox graphify-build [path] [--deep]`
-Silently builds a navigable knowledge graph on the target host:
-```bash
-agentbox graphify-build
-# Output: OK: Knowledge graph built in 4.2s (180 nodes, 420 edges). Location: graphify-out
-```
-
-#### `agentbox graphify-query "<question>"`
-Queries graph structure, relationships, and God nodes directly on the host, returning token-capped answers (~150 tokens instead of dumping megabytes of JSON):
-```bash
-agentbox graphify-query "Authentication and Token flow"
-```
-
----
-
-### 6. Token-Efficient Git History & Changes
-
-Agents waste thousands of tokens downloading full files just to see what changed or inspect past implementations:
-
-#### `agentbox git-status [path]`
-Compact status showing only modified and untracked files with `(+add, -del)` count in a few clean lines:
-```bash
-agentbox git-status
-```
-*Output (~25 tokens vs 500+):*
-```text
-=== GIT STATUS: 3 changed files ===
-  M   src/auth.py (+12, -3)
-  M   src/config.py (+2, -0)
-  ??  tests/test_auth_new.py
-```
-
-#### `agentbox diff [path] [--rev <rev>] [--cached] [--max-lines N]`
-Token-optimized diff that automatically ignores lockfiles (`package-lock.json`, `poetry.lock`, `Cargo.lock`), strips formatting whitespace noise (`-w`), and caps output to avoid context overflow:
-```bash
-agentbox diff src/auth.py
-# Or compare against a commit:
-agentbox diff --rev HEAD~1
-```
-
-#### `agentbox git-log [path] [-n N]`
-Ultra-compact one-line commit history:
-```bash
-agentbox git-log -n 5
-```
-*Output (~30 tokens vs 2,000+):*
-```text
-=== GIT LOG: repository (last 3 commits) ===
-df71336 (2 hours ago) docs: add AGENT.md, AGENTS.md <atitoff>
-0508bc0 (3 hours ago) fix: update project URLs <atitoff>
-2937539 (4 hours ago) feat: initial commit <atitoff>
-```
-
-#### `agentbox git-view <file> [rev] [--start N --end M]`
-Extracts an exact slice of lines from any Git revision without downloading the entire 800-line historical file:
-```bash
-agentbox git-view src/auth.py HEAD~1 --start 20 --end 45
-```
-
-#### `agentbox git-fn-history <file> <function_name> [-n N]`
-Traces the AST modification history of a specific function across Git commits:
-```bash
-agentbox git-fn-history src/auth.py verify_jwt -n 3
-```
-
-### 6. Project Tasks & Recipes (`.agentbox.json`)
-
-Save recurring project commands and parameters (database connections, custom migrations, restart scripts) in `.agentbox.json` (automatically discovered in current directory or parent directories up to the Git root) and execute them with a short recipe command:
-
+#### Option A: Direct JSON (Recommended)
 ```json
 {
-  "host": "user@server",
-  "cwd": "/path/to/project",
-  "venv": "/path/to/project/.venv",
+  "default_target": "local",
+  "targets": {
+    "local": {
+      "cwd": "."
+    },
+    "dev": {
+      "host": "developer@dev.server.com",
+      "cwd": "/home/developer/app",
+      "venv": "/home/developer/app/.venv"
+    },
+    "prod": {
+      "host": "deploy@prod.server.com",
+      "cwd": "/var/www/backend",
+      "readonly": true
+    }
+  },
   "tasks": {
-    "db": "PGPASSWORD=secret psql -h localhost -U user -d db -c {args}",
-    "migrate": "alembic upgrade head",
-    "check-all": "pytest && npm run check"
+    "test": "pytest tests/ -v",
+    "build": "python -m build",
+    "db": "psql -U postgres -d mydb -c {args}"
   }
 }
 ```
 
-#### List available tasks
-```bash
-agentbox task
-# or: agentbox task list
-```
+> [!TIP]
+> * **Zero-Config Local:** If `.agentbox.json` is omitted, AgentBox works 100% locally out of the box.
+> * **Read-Only Guard:** Targets marked `"readonly": true` forbid modifications (`write`, `patch`, `sync push`) and arbitrary runs (`run`, `test`, `spawn`), allowing ONLY safe inspection (`view`, `outline`, `tree`, `grep`, `graphify-query`).
 
-#### Run a task with optional arguments
+#### Option B: Via CLI Commands
 ```bash
-agentbox task migrate
-# With argument substitution ({args} or $@):
-agentbox task db "SELECT * FROM users LIMIT 5;"
-# Or arguments appended cleanly:
-agentbox task check-all --verbose
-```
+# Add targets:
+agentbox target add prod --host deploy@prod.server.com --cwd /var/www/backend --readonly
+agentbox target add dev --host developer@dev.server.com --cwd /home/developer/app
 
-#### Save or update a task recipe
-```bash
-agentbox task add db "PGPASSWORD=secret psql -h localhost -U user -d db -c {args}"
-# Output: OK: Task 'db' saved to .agentbox.json.
-```
-
-#### Remove a task recipe
-```bash
-agentbox task rm db
-# Output: OK: Task 'db' removed from .agentbox.json.
+# Add verified task recipes:
+agentbox task add test "pytest tests/ -v"
+agentbox task add build "python -m build"
+agentbox task add db "psql -U postgres -d mydb -c {args}"
 ```
 
 ---
 
-### 8. Sub-Millisecond Remote Execution (Persistent Daemon Bridge)
+### 3. Generate AI Agent Rules (`AGENTS.md`)
 
-By default, every remote SSH command would incur a 300–1500ms overhead due to SSH handshakes and Python interpreter cold start.
-AgentBox solves this with an **automatic, transparent Persistent Stdio-Daemon Bridge**:
+Generate strict anti-token-waste instructions for your AI agent with a single command:
 
-* **Zero-config auto-start**: Upon your first command, AgentBox automatically spawns a local background bridge that maintains a persistent SSH session connected to `python3 ~/.agentbox_worker.py --daemon`.
-* **Sub-millisecond latency**: AST parsing, outline extraction, and atomic patching execute in-memory on the remote host in **2–5 ms**.
-* **Auto-teardown**: After 30 minutes of inactivity, both the local bridge and remote worker terminate gracefully to free memory.
-* **Fallback guarantee**: If background processes are restricted, AgentBox transparently falls back to direct SSH IPC without interrupting your workflow.
-
-#### Inspect active daemon connections:
 ```bash
-agentbox daemon status
-# Output: Host: user@server | Status: ACTIVE (Sub-ms latency) | PID: 12450 | Port: 54312 | Uptime: 45s
+agentbox rules
 ```
+*(Alias: `agentbox init-rules`)*
 
-#### Stop daemon bridge manually:
-```bash
-agentbox daemon stop
-# Output: Stopped daemon for host: user@server (PID: 12450)
-```
+This creates `AGENTS.md` (or `--type cursor` for `.cursorrules`, `--type claude` for `CLAUDE.md`, or `--type all`):
+* Prohibits noisy `cat`, `find`, raw `grep`, and unbuffered test commands.
+* Injects your configured **targets** (with read-only badges) and **task recipes** directly into the prompt context.
+* Instructs the agent on how to use AgentBox's zero-escaping and AST inspection tools.
 
-#### Bypass daemon for a one-off command:
+Whenever you add or update targets or tasks in `.agentbox.json`, sync your rules in one step:
 ```bash
-agentbox --no-daemon view src/main.py
+agentbox rules --sync
 ```
 
 ---
 
-## 🤖 Enforce AI Agents to use AgentBox (`agentbox init-rules`)
+### 4. Let Your AI Agent Work!
 
-Generate strict anti-token-waste rules for AI assistants (**Cursor, Claude Code, Antigravity, Windsurf, Roo-Code**) with a single command:
+Open **Cursor, Claude Code, Antigravity, Windsurf, Roo-Code, or Aider** and give it any task:
 
-```bash
-agentbox init-rules
-# Output: OK: Created AI rule files: .cursorrules, AGENTS.md, CLAUDE.md
-```
+> *"Inspect the authentication service on prod, locate verify_token, and run test suite on dev."*
 
-Or target a specific environment:
-```bash
-agentbox init-rules --type cursor   # generates .cursorrules
-agentbox init-rules --type agents   # generates AGENTS.md
-agentbox init-rules --type claude   # generates CLAUDE.md
-```
+The AI assistant reads `AGENTS.md` and uses AgentBox automatically:
+* Connects seamlessly over SSH.
+* Self-bootstraps the zero-dependency worker on the remote host in milliseconds.
+* Extracts function ASTs, runs silent tests, and applies escape-proof atomic patches.
 
-This installs strict rules prohibiting the AI assistant from running noisy `cat`, `grep`, `find`, or raw test commands over SSH, forcing the use of token-efficient `agentbox` commands.
+---
+
+## 🧰 AgentBox Toolset Overview
+
+While AI assistants use these tools autonomously via `AGENTS.md`, you can also use them directly:
+
+| Category | Commands | Description |
+|---|---|---|
+| **Targets & Tasks** | `agentbox target`, `agentbox task` | Manage execution environments and run verified project recipes. |
+| **Inspect & Navigate** | `agentbox outline`, `agentbox get-fn`, `agentbox find-fn`, `agentbox view`, `agentbox tree`, `agentbox grep` | AST extraction of classes/functions and token-capped code slices. |
+| **Safe File Edits** | `agentbox patch-lines`, `agentbox write`, `agentbox cp`, `agentbox patch`, `agentbox rollback` | Escape-proof atomic edits with auto-backup and AST validation. |
+| **Silent Runners** | `agentbox test`, `agentbox run`, `agentbox spawn`, `agentbox logs`, `agentbox kill` | Suppress stdout noise; extract high-signal failure tracebacks. |
+| **Git & History** | `agentbox git-status`, `agentbox diff`, `agentbox git-log`, `agentbox git-view`, `agentbox git-fn-history` | Token-capped diffs (ignoring lockfiles/whitespace) and commit logs. |
+| **Sync & Knowledge** | `agentbox sync`, `agentbox graphify-*`, `agentbox daemon` | Two-way file sync, architecture knowledge graph, and sub-ms daemon bridge. |
+
+👉 **For the complete guide and syntax of all 30+ commands, see the [Detailed CLI Reference Manual (`docs/CLI.md`)](docs/CLI.md).**
+
+---
+
+## 💡 Key Architecture Highlights
+
+* **Zero External Dependencies**: Standard Python library only (`argparse`, `ast`, `subprocess`, `json`, `socket`).
+* **Self-Bootstrapping Worker**: Deploys `~/.agentbox_worker.py` over SSH on demand — never requires manual server setup.
+* **Persistent Daemon Bridge**: In-memory worker connection reduces remote execution latency to **2–5 ms**.
+* **Zero-Escaping Protocol**: Code edits and command payloads pass via Base64, `--file`, or stdin streams, eliminating PowerShell and SSH quotation bugs forever.
 
 ---
 

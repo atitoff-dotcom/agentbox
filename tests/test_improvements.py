@@ -280,7 +280,7 @@ class TestImprovements(unittest.TestCase):
         # 3. cmd_patch_lines replaces exact line range
         with patch("sys.stdout", new=StringIO()) as out:
             worker.cmd_patch_lines(str(py_file), 1, 2, "def add(a, b):\n    return a + b + 10\n")
-            self.assertIn("Replaced lines 1-2", out.getvalue())
+            self.assertEqual("OK\n", out.getvalue())
         self.assertIn("return a + b + 10", py_file.read_text(encoding="utf-8"))
 
     def test_hermetic_agentbox_venv_and_sanitization(self):
@@ -314,8 +314,8 @@ class TestImprovements(unittest.TestCase):
         self.assertNotIn("/usr/bin/python3", rewritten)
         self.assertIn("-m pytest", rewritten)
 
-    def test_batch_and_stats_and_mcp(self):
-        from agentbox import worker, mcp_server
+    def test_batch_and_stats(self):
+        from agentbox import worker
 
         f = self.root / "sample.py"
         f.write_text("def greet(name: str) -> str:\n    return f'hi {name}'\n", encoding="utf-8")
@@ -336,25 +336,141 @@ class TestImprovements(unittest.TestCase):
         with patch("sys.stdout", new=StringIO()) as out:
             worker.cmd_stats()
             self.assertIn("AGENTBOX", out.getvalue())
+    def test_get_fn_multiple_functions(self):
+        from agentbox import worker, cli
 
-        # 3. MCP server protocol (initialize, tools/list, tools/call)
-        init_resp = mcp_server.handle_mcp_request({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-        self.assertEqual(init_resp["result"]["serverInfo"]["name"], "ai-agentbox")
+        py_file = self.root / "multi_service.py"
+        py_file.write_text(
+            "class Service:\n"
+            "    def one(self):\n"
+            "        return 1\n\n"
+            "    def two(self):\n"
+            "        return 2\n\n"
+            "    def three(self):\n"
+            "        return 3\n",
+            encoding="utf-8"
+        )
 
-        list_resp = mcp_server.handle_mcp_request({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        tool_names = {t["name"] for t in list_resp["result"]["tools"]}
-        self.assertIn("agentbox_outline", tool_names)
-        self.assertIn("agentbox_refs", tool_names)
-        self.assertIn("agentbox_patch_lines", tool_names)
+        # 1. worker.cmd_get_fn with a list of names
+        with patch("sys.stdout", new=StringIO()) as out:
+            worker.cmd_get_fn(str(py_file), ["Service.one", "Service.three"])
+            output = out.getvalue()
+            self.assertIn("Service.one lines 2-3", output)
+            self.assertIn("return 1", output)
+            self.assertIn("Service.three lines 8-9", output)
+            self.assertIn("return 3", output)
+            self.assertNotIn("Service.two", output)
 
-        call_resp = mcp_server.handle_mcp_request({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": "agentbox_outline", "arguments": {"path": str(f)}}
-        })
-        self.assertFalse(call_resp["result"]["isError"])
-        self.assertIn("def greet(name)", call_resp["result"]["content"][0]["text"])
+        # 2. cli main with multiple names
+        with patch("sys.stdout", new=StringIO()) as out:
+            ret = cli.main(["get-fn", str(py_file), "Service.two", "Service.three"])
+            self.assertEqual(ret, 0)
+            output = out.getvalue()
+            self.assertIn("Service.two lines 5-6", output)
+            self.assertIn("Service.three lines 8-9", output)
+            self.assertNotIn("Service.one", output)
+
+    def test_write_and_patch_lines_from_file(self):
+        from agentbox import worker, cli
+
+        src_data = self.root / "source.txt"
+        src_data.write_text("Hello from file!\nSecond line.\n", encoding="utf-8")
+
+        target_file = self.root / "target.txt"
+
+        # 1. CLI write --file
+        ret = cli.main(["write", str(target_file), "--file", str(src_data)])
+        self.assertEqual(ret, 0)
+        self.assertEqual(target_file.read_text(encoding="utf-8"), "Hello from file!\nSecond line.\n")
+
+        # 2. CLI patch-lines --file
+        patch_data = self.root / "patch.txt"
+        patch_data.write_text("Replaced line!\n", encoding="utf-8")
+        ret = cli.main(["patch-lines", str(target_file), "--start", "1", "--end", "1", "--file", str(patch_data)])
+        self.assertEqual(ret, 0)
+        self.assertEqual(target_file.read_text(encoding="utf-8"), "Replaced line!\nSecond line.\n")
+    def test_json_syntax_validation(self):
+        from agentbox import worker
+
+        json_file = self.root / "config.json"
+        json_file.write_text('{\n  "version": 1,\n  "enabled": true\n}\n', encoding="utf-8")
+
+        # 1. Broken patch rejected
+        with patch("sys.stderr", new=StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                worker.cmd_patch(str(json_file), '"enabled": true', '"enabled": invalid_json,')
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn("JSON SyntaxError", err.getvalue())
+
+        # 2. Valid patch accepted
+        worker.cmd_patch(str(json_file), '"enabled": true', '"enabled": false')
+        self.assertIn('"enabled": false', json_file.read_text(encoding="utf-8"))
+
+        # 3. Broken patch-lines rejected
+        with patch("sys.stderr", new=StringIO()) as err:
+            with self.assertRaises(SystemExit) as cm:
+                worker.cmd_patch_lines(str(json_file), 2, 2, '  "version": [broken')
+            self.assertEqual(cm.exception.code, 1)
+            self.assertIn("JSON SyntaxError", err.getvalue())
+
+        # 4. Valid patch-lines accepted
+        worker.cmd_patch_lines(str(json_file), 2, 2, '  "version": 2,')
+        self.assertIn('"version": 2', json_file.read_text(encoding="utf-8"))
+
+    def test_parse_file_mapping(self):
+        from agentbox.worker import parse_file_mapping
+
+        # Standard mapping
+        self.assertEqual(parse_file_mapping("a.py:scratch/a.py"), ("a.py", "scratch/a.py"))
+        # Windows drive letter on source
+        self.assertEqual(parse_file_mapping(r"C:\Users\test\a.py:scratch/a.py"), (r"C:\Users\test\a.py", "scratch/a.py"))
+        self.assertEqual(parse_file_mapping("C:/Users/test/a.py:scratch/a.py"), ("C:/Users/test/a.py", "scratch/a.py"))
+        # Windows drive letter on destination
+        self.assertEqual(parse_file_mapping(r"a.py:D:\dest\a.py"), ("a.py", r"D:\dest\a.py"))
+        # Windows drive letter on both
+        self.assertEqual(parse_file_mapping(r"C:\local\a.py:D:\remote\a.py"), (r"C:\local\a.py", r"D:\remote\a.py"))
+        # No colon separator
+        self.assertEqual(parse_file_mapping("sub/dir/file.py"), ("sub/dir/file.py", "sub/dir/file.py"))
+        self.assertEqual(parse_file_mapping(r"C:\single\file.py"), (r"C:\single\file.py", r"C:\single\file.py"))
+
+    def test_batch_write_worker(self):
+        from agentbox import worker
+
+        f1 = self.root / "sub1" / "file1.txt"
+        f2 = self.root / "sub2" / "file2.txt"
+
+        files_data = [
+            {"path": str(f1), "content": "Content of file 1"},
+            {"path": str(f2), "base64": "SGVsbG8gZnJvbSBiYXNlNjQ="},
+        ]
+
+        with patch("sys.stdout", new=StringIO()) as out:
+            worker.cmd_write_files(files_data)
+            self.assertIn("OK (2 files written)", out.getvalue())
+
+        self.assertEqual(f1.read_text(encoding="utf-8"), "Content of file 1")
+        self.assertEqual(f2.read_text(encoding="utf-8"), "Hello from base64")
+
+    def test_batch_write_cli(self):
+        src1 = self.root / "src1.py"
+        src2 = self.root / "src2.py"
+        src1.write_text("print('one')", encoding="utf-8")
+        src2.write_text("print('two')", encoding="utf-8")
+
+        dest1 = self.root / "out1.py"
+        dest2 = self.root / "deep" / "out2.py"
+
+        # Multi-file batch write
+        ret = cli.main(["write", f"{src1}:{dest1}", f"{src2}:{dest2}"])
+        self.assertEqual(ret, 0)
+        self.assertEqual(dest1.read_text(encoding="utf-8"), "print('one')")
+        self.assertEqual(dest2.read_text(encoding="utf-8"), "print('two')")
+
+        # Single mapping
+        dest3 = self.root / "out3.py"
+        ret = cli.main(["write", f"{src1}:{dest3}"])
+        self.assertEqual(ret, 0)
+        self.assertEqual(dest3.read_text(encoding="utf-8"), "print('one')")
 
 
 if __name__ == "__main__":

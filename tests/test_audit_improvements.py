@@ -161,6 +161,67 @@ class TestAuditImprovements(unittest.TestCase):
         self.assertIn("return 1", sample.read_text(encoding="utf-8"))
         self.assertFalse(bak_file.exists())
 
+    def test_audit_logger(self):
+        from agentbox import config
+        orig_cwd = os.getcwd()
+        os.chdir(self.dir_path)
+        try:
+            # 1. Clear log
+            config.get_audit_summary(clear=True)
+            self.assertIn("No recorded actions", config.get_audit_summary())
+
+            # 2. Record actions with enriched metadata
+            config.record_audit("view", target="local", path="foo.py", code=0, duration_ms=10, meta={"lines": [1, 25]})
+            config.record_audit("run", target="prod", path="", code=1, duration_ms=250, error="not found", arg="pytest tests/")
+            config.record_audit("grep", target="local", path="src", code=0, duration_ms=15, query="def test_foo", meta={"fixed": True})
+            config.record_audit("patch-lines", target="local", path="app.py", code=0, duration_ms=20, meta={"lines": [10, 30]})
+
+            # 3. Summary
+            summary = config.get_audit_summary(tail=4)
+            self.assertIn("4 actions recorded", summary)
+            self.assertIn("view", summary)
+            self.assertIn("run", summary)
+            self.assertIn("prod", summary)
+            self.assertIn("Recent Failures", summary)
+            self.assertIn("not found", summary)
+            self.assertIn("lines: 1-25", summary)
+            self.assertIn("pytest tests/", summary)
+            self.assertIn("query: def test_foo", summary)
+
+            # 4. Check raw JSON records in audit.jsonl
+            log_file = config.get_audit_log_path()
+            self.assertTrue(log_file.is_file())
+            raw_lines = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(raw_lines), 4)
+            
+            # Record 0: view
+            self.assertEqual(raw_lines[0]["cmd"], "view")
+            self.assertEqual(raw_lines[0]["lines"], [1, 25])
+            
+            # Record 1: run with arg
+            self.assertEqual(raw_lines[1]["cmd"], "run")
+            self.assertEqual(raw_lines[1]["arg"], "pytest tests/")
+            self.assertEqual(raw_lines[1]["err"], "not found")
+
+            # Record 2: grep with query
+            self.assertEqual(raw_lines[2]["cmd"], "grep")
+            self.assertEqual(raw_lines[2]["query"], "def test_foo")
+            self.assertEqual(raw_lines[2]["path"], "src")
+            self.assertTrue(raw_lines[2]["fixed"])
+
+            # Record 3: patch-lines
+            self.assertEqual(raw_lines[3]["cmd"], "patch-lines")
+            self.assertEqual(raw_lines[3]["lines"], [10, 30])
+
+            # 5. CLI audit command
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                ret = cli.main(["audit", "--tail", "4"])
+                self.assertEqual(ret, 0)
+                self.assertIn("4 actions recorded", buf.getvalue())
+        finally:
+            os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

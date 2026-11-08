@@ -26,6 +26,7 @@ if hasattr(sys.stderr, "reconfigure"):
     except Exception:
         pass
 
+import io
 import json
 import time
 import socket
@@ -33,7 +34,7 @@ import secrets
 import hashlib
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 from . import worker
 
@@ -137,11 +138,43 @@ def _is_bridge_alive(info: Dict[str, Any]) -> bool:
 def spawn_bridge_daemon(host: str) -> None:
     """Spawns background bridge server process detached from current terminal."""
     BRIDGE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+    py_exe = sys.executable
+    if sys.platform == "win32":
+        pyw = Path(sys.executable).with_name("pythonw.exe")
+        if pyw.is_file():
+            py_exe = str(pyw)
+
+        # On Windows, spawn via WMI Win32_Process.Create to escape parent Job Objects (e.g. IDE/CI terminals)
+        cmd_line = f'"{py_exe}" -m agentbox.client --bridge-server "{host}"'
+        ps_script = (
+            "$si = [wmiclass]'Win32_ProcessStartup'; "
+            "$si.Properties['ShowWindow'].Value = 0; "
+            f"$res = ([wmiclass]'Win32_Process').Create('{cmd_line}', $null, $si); "
+            "if ($res.ReturnValue -eq 0) { exit 0 } else { exit 1 }"
+        )
+        try:
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                **win_no_window_kwargs()
+            )
+            if res.returncode == 0:
+                return
+        except Exception:
+            pass
+
     flags = 0
+    kwargs = {}
     if sys.platform == "win32":
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000) | subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = flags
+    else:
+        kwargs["start_new_session"] = True
 
-    cmd = [sys.executable, "-m", "agentbox.client", "--bridge-server", host]
+    cmd = [py_exe, "-m", "agentbox.client", "--bridge-server", host]
     try:
         subprocess.Popen(
             cmd,
@@ -149,11 +182,10 @@ def spawn_bridge_daemon(host: str) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
-            creationflags=flags
+            **kwargs
         )
     except Exception:
         pass
-
 
 def handle_bridge_client(conn: socket.socket, token: str, ssh_proc: subprocess.Popen) -> bool:
     """Handles single client connection. Returns True if shutdown was requested."""
@@ -236,7 +268,14 @@ def run_bridge_server(host: str, idle_timeout: int = 1800) -> None:
 
     # Launch SSH process in headless batch mode
     ensure_remote_worker(host)
-    ssh_cmd = ["ssh", "-T", "-o", "BatchMode=yes", host, f"python3 {REMOTE_WORKER_PATH} --daemon"]
+    ssh_cmd = [
+        "ssh", "-T",
+        "-o", "BatchMode=yes",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        host,
+        f"python3 {REMOTE_WORKER_PATH} --daemon"
+    ]
     ssh_env = os.environ.copy()
     ssh_env["PYTHONIOENCODING"] = "utf-8"
     ssh_env["LC_ALL"] = "C.UTF-8"
@@ -337,9 +376,20 @@ def run_bridge_server(host: str, idle_timeout: int = 1800) -> None:
                 pass
 
 
-def execute_via_bridge(host: str, action: str, args: Dict[str, Any]) -> Optional[int]:
+def execute_via_bridge(host: str, action: str, args: Dict[str, Any], capture: bool = False) -> Optional[Union[int, Tuple[int, str, str]]]:
     """Attempts fast command execution via persistent local bridge."""
     info_path = get_bridge_info_path(host)
+    safe_host = "".join(c if c.isalnum() or c in "._-" else "_" for c in host)
+    failed_path = BRIDGE_RUN_DIR / f"bridge_{safe_host}.failed"
+
+    # Cooldown check: if bridge spawn failed recently (<15s), avoid tight respawn loop
+    if failed_path.is_file():
+        try:
+            mtime = failed_path.stat().st_mtime
+            if time.time() - mtime < 15.0:
+                return None
+        except Exception:
+            pass
 
     # 1. Check existing bridge info
     info = None
@@ -373,8 +423,19 @@ def execute_via_bridge(host: str, action: str, args: Dict[str, Any]) -> Optional
                     pass
 
         if not info:
-            # Fallback will handle execution
+            # Record failure cooldown so subsequent calls don't repeatedly spawn dead processes
+            try:
+                failed_path.write_text(str(time.time()), encoding="utf-8")
+            except Exception:
+                pass
             return None
+
+    # Clear failure marker if alive
+    try:
+        if failed_path.is_file():
+            failed_path.unlink()
+    except Exception:
+        pass
 
     # 3. Connect and execute
     try:
@@ -392,6 +453,8 @@ def execute_via_bridge(host: str, action: str, args: Dict[str, Any]) -> Optional
 
         exit_code = 0
         got_exit = False
+        out_parts = []
+        err_parts = []
         while True:
             line = sock_file.readline()
             if not line:
@@ -403,17 +466,29 @@ def execute_via_bridge(host: str, action: str, args: Dict[str, Any]) -> Optional
 
             ev = msg.get("event")
             if ev == "stdout":
-                sys.stdout.write(msg.get("data", ""))
-                sys.stdout.flush()
+                data = msg.get("data", "")
+                if capture:
+                    out_parts.append(data)
+                else:
+                    sys.stdout.write(data)
+                    sys.stdout.flush()
             elif ev == "stderr":
-                sys.stderr.write(msg.get("data", ""))
-                sys.stderr.flush()
+                data = msg.get("data", "")
+                if capture:
+                    err_parts.append(data)
+                else:
+                    sys.stderr.write(data)
+                    sys.stderr.flush()
             elif ev == "exit":
                 exit_code = msg.get("code", 0)
                 got_exit = True
                 break
         sock.close()
-        return exit_code if got_exit else None
+        if not got_exit:
+            return None
+        if capture:
+            return exit_code, "".join(out_parts), "".join(err_parts)
+        return exit_code
     except Exception:
         return None
 
@@ -491,12 +566,12 @@ def stop_daemon(target_host: Optional[str] = None) -> int:
 # Execution Dispatchers
 # ---------------------------------------------------------------------------
 
-def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_daemon: bool = True) -> int:
+def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_daemon: bool = True, capture: bool = False) -> Union[int, Tuple[int, str, str]]:
     """Executes an action either locally or remotely."""
     is_remote = bool(host and host not in ("local", "localhost", "127.0.0.1", "."))
 
     if not is_remote:
-        return execute_local_action(cwd, action, args)
+        return execute_local_action(cwd, action, args, capture=capture)
 
     # Normalize remote paths
     def _norm_remote_path(val: str) -> str:
@@ -514,6 +589,11 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
     if "paths" in args and isinstance(args["paths"], list):
         args["paths"] = [_norm_remote_path(x) for x in args["paths"]]
 
+    if "files" in args and isinstance(args["files"], list):
+        for f in args["files"]:
+            if isinstance(f, dict) and "path" in f and f["path"]:
+                f["path"] = _norm_remote_path(f["path"])
+
     if action == "batch":
         raw_steps = args.get("steps")
         if isinstance(raw_steps, str):
@@ -525,8 +605,13 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
                             if "path" in step and step["path"]:
                                 step["path"] = _norm_remote_path(step["path"])
                             step_args = step.get("args")
-                            if isinstance(step_args, dict) and "path" in step_args and step_args["path"]:
-                                step_args["path"] = _norm_remote_path(step_args["path"])
+                            if isinstance(step_args, dict):
+                                if "path" in step_args and step_args["path"]:
+                                    step_args["path"] = _norm_remote_path(step_args["path"])
+                                if "files" in step_args and isinstance(step_args["files"], list):
+                                    for f in step_args["files"]:
+                                        if isinstance(f, dict) and "path" in f and f["path"]:
+                                            f["path"] = _norm_remote_path(f["path"])
                     args["steps"] = json.dumps(parsed_steps, ensure_ascii=False)
             except Exception:
                 pass
@@ -536,17 +621,22 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
                     if "path" in step and step["path"]:
                         step["path"] = _norm_remote_path(step["path"])
                     step_args = step.get("args")
-                    if isinstance(step_args, dict) and "path" in step_args and step_args["path"]:
-                        step_args["path"] = _norm_remote_path(step_args["path"])
+                    if isinstance(step_args, dict):
+                        if "path" in step_args and step_args["path"]:
+                            step_args["path"] = _norm_remote_path(step_args["path"])
+                        if "files" in step_args and isinstance(step_args["files"], list):
+                            for f in step_args["files"]:
+                                if isinstance(f, dict) and "path" in f and f["path"]:
+                                    f["path"] = _norm_remote_path(f["path"])
 
     if "cwd" not in args or not args["cwd"]:
         args["cwd"] = cwd
 
     # 1. Fast path: execute via persistent daemon bridge
     if use_daemon:
-        code = execute_via_bridge(host, action, args)
-        if code is not None:
-            return code
+        res = execute_via_bridge(host, action, args, capture=capture)
+        if res is not None:
+            return res
 
     # 2. Fallback path: direct SSH IPC over stdin
     ensure_remote_worker(host)
@@ -564,6 +654,7 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
             encoding="utf-8",
             errors="replace",
             env=ssh_env,
+            capture_output=capture,
             **win_no_window_kwargs()
         )
         if proc.returncode == 127:
@@ -575,14 +666,17 @@ def execute_action(host: str, cwd: str, action: str, args: Dict[str, Any], use_d
                 encoding="utf-8",
                 errors="replace",
                 env=ssh_env,
+                capture_output=capture,
                 **win_no_window_kwargs()
             )
+        if capture:
+            return proc.returncode, proc.stdout or "", proc.stderr or ""
         return proc.returncode
     except KeyboardInterrupt:
-        return 0
+        return (0, "", "") if capture else 0
 
 
-def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
+def execute_local_action(cwd: str, action: str, args: Dict[str, Any], capture: bool = False) -> Union[int, Tuple[int, str, str]]:
     """Invokes worker directly in local process without extra processes."""
     if cwd:
         try:
@@ -591,16 +685,35 @@ def execute_local_action(cwd: str, action: str, args: Dict[str, Any]) -> int:
         except Exception:
             pass
 
+    out_io = io.StringIO()
+    err_io = io.StringIO()
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    if capture:
+        sys.stdout = out_io
+        sys.stderr = err_io
+
+    code = 0
     try:
         worker.dispatch_action(action, args)
-        return 0
     except KeyboardInterrupt:
-        return 0
+        code = 0
     except SystemExit as se:
-        return se.code if isinstance(se.code, int) else 1
+        code = se.code if isinstance(se.code, int) else 1
     except Exception as e:
-        print(f"ERROR: Local execution failed: {e}", file=sys.stderr)
-        return 1
+        if capture:
+            err_io.write(f"ERROR: Local execution failed: {e}\n")
+        else:
+            print(f"ERROR: Local execution failed: {e}", file=sys.stderr)
+        code = 1
+    finally:
+        if capture:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+    if capture:
+        return code, out_io.getvalue(), err_io.getvalue()
+    return code
 
 
 if __name__ == "__main__":
