@@ -1,5 +1,7 @@
 # 📖 AgentBox CLI Reference Manual
 
+[English](CLI.md) | [Русский](CLI.ru.md)
+
 AgentBox provides a unified, token-efficient command-line toolkit for AI coding assistants (**Cursor, Claude Code, Antigravity, Aider, Windsurf, Roo-Code**) working across local environments and remote SSH servers.
 
 > [!TIP]
